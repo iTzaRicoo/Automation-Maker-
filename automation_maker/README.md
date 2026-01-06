@@ -39,9 +39,59 @@ Krijg je:
 
 Dat is het hele punt.
 
-## Installatie (Local add-on)
+## Installatie
 
-Binnenkort beschikbaar
+Home Assistant is geweldig.
+Automations bouwen is soms… minder geweldig.
+
+**Automation Maker** is de “WANNEER → DAN → Test” knop waar je brein om vroeg, terwijl YAML je nog steeds passief-agressief aankijkt vanaf de zijlijn.
+
+## Installatie (de officiële ‘ik wil klikken en klaar’-methode)
+
+Je installeert dit via de Home Assistant Add-on Store door deze repository toe te voegen.
+
+### Optie A: One-click (My Home Assistant)
+Klik deze link en Home Assistant zet het repository-adres alvast klaar:
+
+[Voeg deze add-on repository toe](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https://github.com/iTzaRicoo/Automation-Maker-)
+
+> Als dit niet werkt, dan is Home Assistant boos omdat je geen Supervisor/OS/Supervised gebruikt.
+> Dat is niet jouw schuld. (Oké misschien een beetje.)  
+
+### Optie B: Handmatig (voor mensen die graag zelf lijden)
+1. Ga naar **Settings → Add-ons → Add-on store**
+2. Klik rechtsboven op **⋮**
+3. Kies **Repositories**
+4. Plak deze URL: https://github.com/iTzaRicoo/Automation-Maker-
+5. Klik **Add** / **Save**
+6. Zoek naar **Automation Maker**
+7. **Install** → **Start** → **Open Web UI**
+
+En tada: je hebt nu een automation-maker die doet alsof je een normale hobby hebt.
+
+## Eerste keer starten (mini checklist)
+
+- Start de add-on
+- Open de Web UI
+- Maak iets simpels:
+- WANNEER: tijdstip
+- DAN: zet een lamp aan
+- Druk op **Test**
+- Als je twijfelt: druk op **Leg uit alsof ik 5 ben**
+
+## Troubleshooting (oftewel: “waarom doet ‘ie raar?”)
+
+- Zie je de add-on niet?
+- Zet **Advanced Mode** aan
+- Refresh de pagina
+- Doe alsof je dit altijd al wist
+- Test werkt niet?
+- Check add-on logs
+- Meestal is het iets met rechten/token (oftewel: Home Assistant was weer Home Assistant)
+
+## Add-on in deze repository
+
+- `automation_maker` — de add-on zelf
 
 ## Gebruik
 
@@ -105,3 +155,4 @@ Soms wint de robot.
 
 Kies een license die bij je past.  
 Ik ben maar een README, geen advocaat.
+

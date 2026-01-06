@@ -611,4 +611,4 @@ if __name__ == "__main__":
     print(f"Automations path: {AUTOMATIONS_PATH}")
     print(f"Supervisor token: {'Available' if SUPERVISOR_TOKEN else 'Missing'}")
     print("=" * 60 + "\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=8099, debug=False)

@@ -1,9 +1,23 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
-RUN apk add --no-cache python3 py3-pip && pip3 install --no-cache-dir flask==3.0.0 flask-cors==4.0.0 pyyaml==6.0.1 requests==2.31.0
+
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    && pip3 install --no-cache-dir \
+    flask==3.0.0 \
+    flask-cors==4.0.0 \
+    pyyaml==6.0.1 \
+    requests==2.31.0
+
 COPY app.py /app.py
 COPY index.html /index.html
 COPY run.sh /run.sh
+
 RUN chmod a+x /run.sh
+
 WORKDIR /
+
+# ✅ Zorg dat s6-overlay echt start
+ENTRYPOINT ["/init"]
 CMD [ "/run.sh" ]

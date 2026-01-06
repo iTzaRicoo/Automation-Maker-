@@ -38,3 +38,5 @@ Maar hé: **het is beta**, geen toverspreuk.
 
 ## 1.0.1
 - 📄 Changelog zichtbaar gemaakt in de Add-on Store
+## 1.0.2
+- 📄 Add icon and logo :-)

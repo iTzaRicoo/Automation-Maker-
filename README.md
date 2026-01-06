@@ -1,14 +1,12 @@
 # Automation Maker (Home Assistant Add-on)
 
-Automation Maker is een (bijna schandalig) simpele manier om Home Assistant automations te maken, bewerken en testen — zonder dat je eerst een studie “YAML & Verdriet” hoeft af te ronden.
+Automation Maker is een (bijna schandalig) simpele manier om Home Assistant automations te maken, bewerken en testen, zonder dat je eerst een studie “YAML & Verdriet” hoeft af te ronden.
 
 Je kiest:
 - **WANNEER** iets moet gebeuren  
 - **DAN** wat er moet gebeuren  
 - drukt op **Test**  
 - en krijgt een uitleg die zelfs je buurman begrijpt die denkt dat “Home Assistant” een nieuwe zorgverzekering is.
-
----
 
 ## Waarom bestaat dit?
 
@@ -20,8 +18,6 @@ Automation Maker doet hetzelfde, maar dan met:
 - testresultaten die stap voor stap “afspelen”
 - en een knop die letterlijk zegt: **Leg uit alsof ik 5 ben**
 
----
-
 ## Features
 
 - Automations maken via een simpele UI (WANNEER → DAN)
@@ -31,8 +27,6 @@ Automation Maker doet hetzelfde, maar dan met:
 - **ELI5-modus**: “Leg uit alsof ik 5 ben” maakt de uitleg nog simpeler
 - Automations worden netjes als YAML opgeslagen in je gekozen map
 - Automations reload na opslaan (geen “waarom werkt het niet” rondje door de UI)
-
----
 
 ## Hoe ziet “Test” eruit?
 
@@ -45,22 +39,10 @@ Krijg je:
 
 Dat is het hele punt.
 
----
-
 ## Installatie (Local add-on)
 
-Automation Maker is bedoeld als **Local Add-on**.
 
-1. Open je Home Assistant server (waar `/addons/local/` bestaat)
-2. Run het installatie script (de `.sh` die je in deze repo vindt / of die je van mij kreeg)
-3. Ga naar:
-   - **Instellingen → Add-ons**
-   - **⋮ → Advanced Mode aan**
-   - Refresh (F5)
-4. Je ziet **Automation Maker** bij *Local add-ons*
-5. **Install → Start → Open Web UI**
-
-Klaar. Je kunt nu automations maken zonder dat je toetsenbord je aanklaagt.
+Binnenkort beschikbaar.
 
 ---
 
@@ -83,8 +65,6 @@ Als die aan staat:
 - verdwijnen technische details
 - en voelt alles alsof het gemaakt is voor normale mensen (rare doelgroep, maar toch)
 
----
-
 ## Wat wordt opgeslagen?
 
 Automations worden als `.yaml` opgeslagen in:
@@ -93,24 +73,21 @@ Automations worden als `.yaml` opgeslagen in:
 
 (tenzij je het in de add-on opties anders instelt)
 
----
-
 ## Roadmap / To do
 
-- Meer triggers (zone, mqtt, webhook, etc.)
-- Conditions (maar dan zonder dat je spontaan gaat googelen)
-- Meer acties (media, climate, scripts, alles)
 - UI polish en nog meer “oh, dit snap ik” momentjes
-
----
+- Automation sanity check: “Deze automation kan zichzelf oneindig triggeren. Dat is een slecht idee.”
+- Conflict-detectie: “Je hebt al een automation die deze lamp om 19:00 uitzet… botsing?”
+- ‘Are you sure?’ bij gevaarlijke acties: (Alles uit, verwarming uit bij -10, etc.)
+- Zoeken in normaal Nederlands, Typ: “lamp avond” → juiste automation verschijnt.
+- Easter eggs
+- Vele andere ideeen, die vast op kunnen komen.
 
 ## Bekende bijwerkingen
 
 - Je gaat ineens veel meer automations maken “omdat het nu toch makkelijk is”
 - Je vrienden gaan vragen of je “even hun Home Assistant wil fixen”
 - Je ontdekt dat je lampen al die tijd prima waren, jij niet
-
----
 
 ## Contributing
 
@@ -121,15 +98,11 @@ Bugs ook, maar graag met:
 - wat er gebeurde
 - en of je Home Assistant je daarna uitlachte
 
----
-
 ## Disclaimer
 
 Deze add-on probeert het leven makkelijker te maken.  
 Home Assistant blijft Home Assistant.  
 Soms wint de robot.
-
----
 
 ## License
 

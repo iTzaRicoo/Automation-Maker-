@@ -18,6 +18,5 @@ RUN chmod a+x /run.sh
 
 WORKDIR /
 
-# ✅ Zorg dat s6-overlay echt start
 ENTRYPOINT ["/init"]
 CMD [ "/run.sh" ]

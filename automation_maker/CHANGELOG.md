@@ -35,3 +35,6 @@ Maar hé: **het is beta**, geen toverspreuk.
 **Status:** 🧪 Beta  
 **Gebruik op eigen risico:** ja  
 **Terug willen naar YAML:** waarschijnlijk nooit meer
+
+## 1.0.1
+- 📄 Changelog zichtbaar gemaakt in de Add-on Store

@@ -12,8 +12,6 @@ RUN apk add --no-cache \
 
 COPY automation_maker/main.py /app.py
 COPY automation_maker/index.html /index.html
-COPY automation_maker/styles.css /styles.css
-COPY automation_maker/script.js /script.js
 COPY run.sh /run.sh
 
 RUN chmod a+x /run.sh

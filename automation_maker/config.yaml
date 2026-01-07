@@ -27,6 +27,7 @@ panel_title: Automation Maker
 options:
   automations_path: "/config/include/automations"
   supervisor_token: ""
+  debug_mode: false
 schema:
   automations_path: str
   supervisor_token: password?

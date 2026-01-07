@@ -10,7 +10,7 @@ RUN apk add --no-cache \
     pyyaml==6.0.1 \
     requests==2.31.0
 
-COPY main.py /app.py
+COPY app.py /app.py
 COPY index.html /index.html
 COPY run.sh /run.sh
 

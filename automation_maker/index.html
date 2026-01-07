@@ -1,312 +1,901 @@
 <!DOCTYPE html>
 <html lang="nl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Automation Maker</title>
-<script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Automation Maker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    @keyframes slideFadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes pop {
+      0%   { transform: scale(0.98); }
+      60%  { transform: scale(1.03); }
+      100% { transform: scale(1); }
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    .step-enter { animation: slideFadeIn 260ms ease-out both; }
+    .result-pop { animation: pop 260ms ease-out both; }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 3px solid rgba(0,0,0,0.12);
+      border-top-color: rgba(0,0,0,0.55);
+      border-radius: 999px;
+      animation: spin 700ms linear infinite;
+    }
+
+    .progressbar {
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(15,23,42,0.08);
+    }
+    .progressbar > div {
+      height: 100%;
+      width: 0%;
+      transition: width 350ms ease;
+      background: rgba(15,23,42,0.65);
+    }
+  </style>
 </head>
+
 <body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen p-4">
-<div class="max-w-4xl mx-auto">
-<div class="bg-white rounded-2xl shadow-xl p-6 mb-6">
-<div class="flex items-center justify-between mb-4">
-<div>
-<h1 class="text-3xl font-bold text-gray-800">Automation Maker</h1>
-<p class="text-gray-600">Maak automations voor Home Assistant</p>
-</div>
-<div id="status" class="text-sm">
-<span class="inline-block w-3 h-3 bg-gray-400 rounded-full mr-2"></span>
-<span>Verbinding maken...</span>
-</div>
-</div>
+  <div class="max-w-4xl mx-auto">
 
-<div class="mb-6">
-<label class="block text-lg font-semibold text-gray-700 mb-2">Naam</label>
-<input type="text" id="name" placeholder="bijv. Ochtendlicht" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none"/>
-</div>
+    <!-- Debug Panel -->
+    <div id="debugPanel" class="bg-yellow-50 border-2 border-yellow-400 rounded-xl p-4 mb-4">
+      <div class="flex justify-between items-center mb-2">
+        <h3 class="font-bold text-yellow-800">🔍 Debug Console</h3>
+        <button onclick="toggleDebug()" class="text-sm bg-yellow-200 px-3 py-1 rounded">Toggle</button>
+      </div>
+      <div id="debugLog" class="text-xs font-mono space-y-1 max-h-48 overflow-y-auto"></div>
+    </div>
 
-<div class="mb-6 bg-green-50 p-5 rounded-xl">
-<label class="block text-lg font-semibold text-gray-700 mb-3">WANNEER (Trigger)</label>
-<select id="triggerType" onchange="showTrigger()" class="w-full px-4 py-3 mb-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none">
-<option value="">-- Kies een trigger --</option>
-<option value="time">Op een tijdstip</option>
-<option value="state">Als apparaat verandert</option>
-<option value="sun">Zonsopgang/ondergang</option>
-<option value="motion">Bij beweging</option>
-</select>
-<div id="triggerInputs"></div>
-</div>
+    <div class="bg-white rounded-2xl shadow-xl p-6 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h1 class="text-3xl font-bold text-gray-800">Automation Maker</h1>
+          <p class="text-gray-600">Maak, bewerk en test automations (zonder ingewikkelde termen)</p>
+        </div>
+        <div id="status" class="text-sm">
+          <span class="inline-block w-3 h-3 bg-gray-400 rounded-full mr-2 animate-pulse"></span>
+          <span>Verbinding maken...</span>
+        </div>
+      </div>
 
-<div class="mb-6 bg-blue-50 p-5 rounded-xl">
-<label class="block text-lg font-semibold text-gray-700 mb-3">DAN (Actie)</label>
-<select id="actionType" onchange="showAction()" class="w-full px-4 py-3 mb-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">
-<option value="">-- Kies een actie --</option>
-<option value="turn_on">Zet aan</option>
-<option value="turn_off">Zet uit</option>
-<option value="notify">Stuur melding</option>
-<option value="scene">Activeer scene</option>
-</select>
-<div id="actionInputs"></div>
-</div>
+      <!-- Edit banner -->
+      <div id="editBanner" class="hidden mb-5 border-2 border-indigo-300 bg-indigo-50 rounded-xl p-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="font-bold text-indigo-800">✏️ Bewerken</div>
+            <div id="editBannerText" class="text-sm text-indigo-700"></div>
+          </div>
+          <button onclick="cancelEdit()"
+                  class="bg-white border border-indigo-300 text-indigo-700 px-4 py-2 rounded-lg hover:bg-indigo-100 transition-colors">
+            Annuleren
+          </button>
+        </div>
+      </div>
 
-<button onclick="save()" class="w-full bg-gradient-to-r from-blue-500 to-indigo-600 text-white py-4 px-6 rounded-xl text-lg font-semibold hover:from-blue-600 hover:to-indigo-700 transition-all shadow-lg">
-Automation Opslaan
-</button>
-</div>
+      <!-- Test runner -->
+      <div id="testPanel" class="hidden mb-5 border-2 border-slate-200 bg-slate-50 rounded-xl p-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="font-bold text-slate-800">🧪 Test</div>
+            <div class="text-sm text-slate-600">
+              We doen alsof het <b>WANNEER</b> klopt en voeren alleen <b>DAN</b> uit.
+            </div>
+          </div>
 
-<div id="list" class="bg-white rounded-2xl shadow-xl p-6 hidden">
-<h2 class="text-2xl font-bold text-gray-800 mb-4">Opgeslagen Automations (<span id="count">0</span>)</h2>
-<div id="items" class="space-y-3"></div>
-</div>
-</div>
+          <div class="flex items-center gap-2">
+            <button id="eli5Btn" onclick="toggleELI5()"
+                    class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors">
+              🧸 Leg uit alsof ik 5 ben: UIT
+            </button>
+            <button onclick="hideTest()"
+                    class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-100 transition-colors">
+              Sluiten
+            </button>
+          </div>
+        </div>
+        <div id="testSteps" class="mt-3 space-y-2"></div>
+      </div>
 
-<script>
-// API URL - gebruik relatieve paths voor Ingress compatibiliteit
-const API_BASE = '';
-let entities = [];
+      <!-- Form -->
+      <div class="mb-6">
+        <label class="block text-lg font-semibold text-gray-700 mb-2">Naam</label>
+        <input type="text" id="name" placeholder="bijv. Lamp aan in de avond"
+               class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none" />
+      </div>
 
-async function init() {
-    console.log('Initializing...');
-    
-    try {
-        console.log('Fetching entities from:', API_BASE + '/api/entities');
-        
-        const response = await fetch(API_BASE + '/api/entities', {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json'
+      <div class="mb-6 bg-green-50 p-5 rounded-xl">
+        <label class="block text-lg font-semibold text-gray-700 mb-3">WANNEER</label>
+        <select id="triggerType" onchange="showTrigger()"
+                class="w-full px-4 py-3 mb-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none">
+          <option value="">-- Kies wanneer --</option>
+          <option value="time">Op een tijdstip</option>
+          <option value="state">Als iets verandert</option>
+          <option value="sun">Zonsopgang/ondergang</option>
+        </select>
+        <div id="triggerInputs"></div>
+      </div>
+
+      <div class="mb-6 bg-blue-50 p-5 rounded-xl">
+        <label class="block text-lg font-semibold text-gray-700 mb-3">DAN</label>
+        <select id="actionType" onchange="showAction()"
+                class="w-full px-4 py-3 mb-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">
+          <option value="">-- Kies wat er moet gebeuren --</option>
+          <option value="turn_on">Zet aan</option>
+          <option value="turn_off">Zet uit</option>
+          <option value="notify">Laat een melding zien</option>
+          <option value="scene">Start een scene</option>
+        </select>
+        <div id="actionInputs"></div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button onclick="save()"
+                class="w-full bg-gradient-to-r from-blue-500 to-indigo-600 text-white py-4 px-6 rounded-xl text-lg font-semibold hover:from-blue-600 hover:to-indigo-700 transition-all shadow-lg">
+          💾 Opslaan
+        </button>
+
+        <button onclick="testRun()"
+                class="w-full bg-gradient-to-r from-slate-700 to-slate-900 text-white py-4 px-6 rounded-xl text-lg font-semibold hover:from-slate-800 hover:to-black transition-all shadow-lg">
+          🧪 Test
+        </button>
+      </div>
+    </div>
+
+    <!-- List -->
+    <div id="list" class="bg-white rounded-2xl shadow-xl p-6 hidden">
+      <h2 class="text-2xl font-bold text-gray-800 mb-4">
+        Opgeslagen Automations (<span id="count">0</span>)
+      </h2>
+      <div id="items" class="space-y-3"></div>
+    </div>
+
+  </div>
+
+  <script>
+    // Ingress-friendly base
+    const API_BASE = window.location.pathname.replace(/\/$/, '');
+    let entities = [];
+    let debugVisible = true;
+    let editingFilename = null;
+
+    // ELI5 mode
+    let explainLike5 = false;
+
+    function toggleELI5() {
+      explainLike5 = !explainLike5;
+      const btn = document.getElementById('eli5Btn');
+      if (btn) btn.textContent = explainLike5 ? '🧸 Leg uit alsof ik 5 ben: AAN' : '🧸 Leg uit alsof ik 5 ben: UIT';
+      log(`ELI5 mode: ${explainLike5 ? 'ON' : 'OFF'}`, 'info');
+    }
+
+    // ----------------------------
+    // Debug + Status
+    // ----------------------------
+    function log(message, type = 'info') {
+      const el = document.getElementById('debugLog');
+      const ts = new Date().toLocaleTimeString();
+      const color =
+        type === 'error' ? 'text-red-700' :
+        type === 'success' ? 'text-green-700' :
+        type === 'warn' ? 'text-yellow-700' :
+        'text-gray-800';
+
+      const line = document.createElement('div');
+      line.className = color;
+      line.textContent = `[${ts}] ${message}`;
+      el.prepend(line);
+    }
+
+    function toggleDebug() {
+      debugVisible = !debugVisible;
+      const panel = document.getElementById('debugPanel');
+      if (debugVisible) panel.classList.remove('hidden');
+      else panel.classList.add('hidden');
+    }
+
+    function setStatus(text, color = 'gray') {
+      document.getElementById('status').innerHTML =
+        `<span class="inline-block w-3 h-3 bg-${color}-500 rounded-full mr-2"></span>` +
+        `<span class="text-${color}-700">${text}</span>`;
+    }
+
+    async function testAPI(endpoint) {
+      const url = API_BASE + endpoint;
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const data = await response.json();
+          return { ok: true, data };
+        }
+        return { ok: false, status: response.status };
+      } catch (error) {
+        log(`Fetch error: ${error.message}`, 'error');
+        return { ok: false, error: error.message };
+      }
+    }
+
+    async function init() {
+      setStatus('Verbinden...', 'yellow');
+      const health = await testAPI('/api/health');
+      if (!health.ok) {
+        setStatus('Geen verbinding', 'red');
+        return;
+      }
+
+      setStatus('Entiteiten laden...', 'yellow');
+      const entitiesResult = await testAPI('/api/entities');
+      if (!entitiesResult.ok) {
+        setStatus('Entiteiten laden mislukt', 'red');
+        return;
+      }
+
+      entities = entitiesResult.data;
+      setStatus(`Verbonden`, 'green');
+      loadList();
+    }
+
+    // ----------------------------
+    // Helpers
+    // ----------------------------
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'","&#039;");
+    }
+
+    function isLightEntity(entityId) {
+      return (entityId || '').startsWith('light.');
+    }
+
+    function entitySelect(id, domains = [], onChange = '') {
+      let filtered = entities;
+      if (domains.length > 0) filtered = entities.filter(e => domains.includes(e.domain));
+
+      let html = `<select id="${id}" ${onChange ? `onchange="${onChange}"` : ''}
+                 class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">`;
+      html += '<option value="">-- Kies iets --</option>';
+      filtered.forEach(e => {
+        // Toon alleen friendly name (geen entity_id zichtbaar)
+        html += `<option value="${e.entity_id}">${escapeHtml(e.name)}</option>`;
+      });
+      html += '</select>';
+      return html;
+    }
+
+    function prettyTargetLabel(entityId) {
+      const found = entities.find(e => e.entity_id === entityId);
+      if (found && found.name) return found.name;
+      if ((entityId || '').startsWith('light.')) return 'een lamp';
+      if ((entityId || '').startsWith('switch.')) return 'een schakelaar';
+      if ((entityId || '').startsWith('fan.')) return 'een ventilator';
+      if ((entityId || '').startsWith('input_boolean.')) return 'een schakelaar (virtueel)';
+      if ((entityId || '').startsWith('scene.')) return 'een scene';
+      return 'iets';
+    }
+
+    // Convert color input (#rrggbb) -> [r,g,b] for backend
+    function colorHexToRgbArray(hex) {
+      const v = (hex || '#ffffff').replace('#','');
+      const r = parseInt(v.slice(0,2), 16);
+      const g = parseInt(v.slice(2,4), 16);
+      const b = parseInt(v.slice(4,6), 16);
+      return [r,g,b];
+    }
+
+    // ----------------------------
+    // Trigger UI
+    // ----------------------------
+    function showTrigger(prefill = null) {
+      const type = prefill?.type ?? document.getElementById('triggerType').value;
+      const container = document.getElementById('triggerInputs');
+
+      if (!type) { container.innerHTML = ''; return; }
+
+      if (type === 'time') {
+        const v = prefill?.value ?? '12:00';
+        container.innerHTML =
+          '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Tijd:</label>' +
+          `<input type="time" id="triggerValue" value="${v}"
+             class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none"/>`;
+      } else if (type === 'state') {
+        container.innerHTML =
+          '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Wat moet veranderen?</label>' +
+          entitySelect('triggerValue');
+        if (prefill?.value) setTimeout(() => document.getElementById('triggerValue').value = prefill.value, 0);
+      } else if (type === 'sun') {
+        const event = prefill?.sunEvent ?? 'sunrise';
+        const offset = prefill?.sunOffset ?? 'after';
+        const mins = prefill?.sunMinutes ?? '0';
+        container.innerHTML = `
+          <label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Moment:</label>
+          <select id="sunEvent"
+            class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none">
+            <option value="sunrise">Zonsopgang</option>
+            <option value="sunset">Zonsondergang</option>
+          </select>
+
+          <div class="grid grid-cols-2 gap-3 mt-3">
+            <div>
+              <label class="block text-sm font-semibold text-gray-700 mb-2">Timing:</label>
+              <select id="sunOffset"
+                class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none">
+                <option value="after">Na</option>
+                <option value="before">Voor</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-gray-700 mb-2">Aantal minuten:</label>
+              <input id="sunMinutes" type="number" min="0" value="${mins}"
+                class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none" />
+            </div>
+          </div>
+        `;
+        setTimeout(() => {
+          document.getElementById('sunEvent').value = event;
+          document.getElementById('sunOffset').value = offset;
+        }, 0);
+      }
+    }
+
+    // ----------------------------
+    // Action UI (with color only when light selected)
+    // ----------------------------
+    function renderLightExtras(prefill = null) {
+      const b = (prefill?.brightness ?? 255);
+      return `
+        <div id="lightExtras" class="mt-4 border-2 border-blue-200 bg-white rounded-xl p-4">
+          <div class="font-semibold text-gray-800 mb-3">💡 Lamp instellingen</div>
+
+          <label class="block text-sm font-semibold text-gray-700 mb-2">Kies een kleur</label>
+          <div class="flex items-center gap-3">
+            <input type="color" id="lightColor" value="${prefill?.colorPickerValue || '#ffffff'}"
+                   class="w-16 h-12 border-2 border-gray-300 rounded-xl" />
+            <div class="text-sm text-gray-600">Klik op het vakje en kies je kleur.</div>
+          </div>
+
+          <div class="mt-4">
+            <label class="block text-sm font-semibold text-gray-700 mb-2">Helderheid</label>
+            <input type="range" id="lightBrightness" min="0" max="255" value="${b}"
+                   class="w-full" oninput="document.getElementById('brightnessValue').textContent=this.value" />
+            <div class="text-sm text-gray-600 mt-1">Niveau: <span id="brightnessValue">${b}</span></div>
+          </div>
+        </div>
+      `;
+    }
+
+    function onActionEntityChanged() {
+      const entityId = document.getElementById('actionValue')?.value || '';
+      const extrasHost = document.getElementById('actionExtrasHost');
+      if (!extrasHost) return;
+
+      const actionType = document.getElementById('actionType').value;
+
+      // Only show color/brightness for turn_on + light.*
+      if (actionType === 'turn_on' && isLightEntity(entityId)) {
+        extrasHost.innerHTML = renderLightExtras();
+      } else {
+        extrasHost.innerHTML = '';
+      }
+    }
+
+    function showAction(prefill = null) {
+      const type = prefill?.type ?? document.getElementById('actionType').value;
+      const container = document.getElementById('actionInputs');
+
+      if (!type) { container.innerHTML = ''; return; }
+
+      if (type === 'turn_on' || type === 'turn_off') {
+        container.innerHTML =
+          '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Wat moet er gebeuren met:</label>' +
+          entitySelect('actionValue', ['light', 'switch', 'fan', 'input_boolean'], 'onActionEntityChanged()') +
+          '<div id="actionExtrasHost"></div>';
+
+        setTimeout(() => {
+          if (prefill?.value) document.getElementById('actionValue').value = prefill.value;
+
+          onActionEntityChanged();
+
+          if (type === 'turn_on' && isLightEntity(prefill?.value)) {
+            if (prefill?.color_rgb && prefill.color_rgb.length === 3) {
+              const [r,g,b] = prefill.color_rgb.map(n => Number(n) || 0);
+              const hex = '#' + [r,g,b].map(x => ('0' + x.toString(16)).slice(-2)).join('');
+              const c = document.getElementById('lightColor');
+              if (c) c.value = hex;
             }
+            if (prefill?.brightness !== undefined) {
+              const br = document.getElementById('lightBrightness');
+              const bv = document.getElementById('brightnessValue');
+              if (br) br.value = prefill.brightness;
+              if (bv) bv.textContent = prefill.brightness;
+            }
+          }
+        }, 0);
+
+      } else if (type === 'notify') {
+        const msg = prefill?.value ?? '';
+        const svc = prefill?.service ?? 'notify.notify';
+        container.innerHTML = `
+          <label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Waar moet de melding heen?</label>
+          <input type="text" id="notifyService" value="${svc}"
+                 class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none"/>
+
+          <label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Wat moet er in de melding staan?</label>
+          <textarea id="actionValue" rows="3"
+                    class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">${msg}</textarea>
+        `;
+      } else if (type === 'scene') {
+        container.innerHTML =
+          '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Welke scene?</label>' +
+          '<input type="text" id="actionValue" placeholder="scene.naam" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none"/>';
+        setTimeout(() => { if (prefill?.value) document.getElementById('actionValue').value = prefill.value; }, 0);
+      }
+    }
+
+    // ----------------------------
+    // Edit / Form helpers
+    // ----------------------------
+    function showEditBanner(filename) {
+      const banner = document.getElementById('editBanner');
+      const text = document.getElementById('editBannerText');
+      banner.classList.remove('hidden');
+      text.innerHTML = `Je bewerkt: <span class="font-mono font-semibold">${escapeHtml(filename)}</span>`;
+    }
+
+    function hideEditBanner() {
+      document.getElementById('editBanner').classList.add('hidden');
+      document.getElementById('editBannerText').innerHTML = '';
+    }
+
+    function clearForm() {
+      document.getElementById('name').value = '';
+      document.getElementById('triggerType').value = '';
+      document.getElementById('actionType').value = '';
+      document.getElementById('triggerInputs').innerHTML = '';
+      document.getElementById('actionInputs').innerHTML = '';
+    }
+
+    function cancelEdit() {
+      editingFilename = null;
+      hideEditBanner();
+      clearForm();
+      log('Edit cancelled', 'warn');
+    }
+
+    // ----------------------------
+    // Test panel
+    // ----------------------------
+    function hideTest() {
+      document.getElementById('testPanel').classList.add('hidden');
+      document.getElementById('testSteps').innerHTML = '';
+    }
+
+    function actionHeadline(action) {
+      if (!action) return explainLike5 ? 'We doen iets' : 'We voeren een actie uit';
+      if (action.type === 'turn_on') return explainLike5 ? 'We zetten iets aan 👆' : 'We zetten iets AAN';
+      if (action.type === 'turn_off') return explainLike5 ? 'We zetten iets uit 👇' : 'We zetten iets UIT';
+      if (action.type === 'notify') return explainLike5 ? 'We laten een berichtje zien 💬' : 'We laten een melding zien';
+      if (action.type === 'scene') return explainLike5 ? 'We zetten een sfeer aan ✨' : 'We starten een scene';
+      return explainLike5 ? 'We doen iets' : 'We voeren een actie uit';
+    }
+
+    function renderActionPreviewCard(automation) {
+      const action = automation?.action || {};
+      const targetLabel = prettyTargetLabel(action.value);
+
+      let extra = '';
+      if (action.type === 'turn_on' && isLightEntity(action.value)) {
+        const rgb = action.color_rgb;
+        const br = action.brightness ?? 255;
+
+        if (rgb && rgb.length === 3) {
+          const opacity = Math.max(0.2, (Number(br) || 255) / 255);
+          extra = `
+            <div class="mt-3 flex items-center justify-between gap-3">
+              <div class="text-sm text-gray-600">
+                ${explainLike5 ? 'We kiezen een kleurtje en hoe fel het lampje is.' : 'Kleur en helderheid worden toegepast.'}
+              </div>
+              <div class="w-12 h-12 rounded-xl border" style="background: rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]}); opacity:${opacity}"></div>
+            </div>
+          `;
+        }
+      }
+
+      return `
+        <div class="border-2 border-slate-200 bg-white rounded-xl p-4 step-enter">
+          <div class="text-lg font-bold text-slate-800">👀 Wat gaat er gebeuren?</div>
+          <div class="mt-1 text-slate-700">${actionHeadline(action)}</div>
+          <div class="text-sm text-slate-500 mt-1">
+            ${explainLike5 ? 'Voor:' : 'Doel:'} <span class="font-semibold">${escapeHtml(targetLabel)}</span>
+          </div>
+          ${extra}
+        </div>
+      `;
+    }
+
+    function stepCard({ icon, title, text, ok, extra }, state = 'done') {
+      const border =
+        state === 'pending' ? 'border-slate-200 bg-white' :
+        state === 'running' ? 'border-yellow-200 bg-yellow-50' :
+        ok ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50';
+
+      const left =
+        state === 'running'
+          ? `<div class="spinner mt-1"></div>`
+          : `<div class="text-2xl leading-none">${icon}</div>`;
+
+      // In ELI5: nooit tech details tonen
+      const showDetails = (!explainLike5 && extra && Object.keys(extra).length);
+
+      return `
+        <div class="border-2 ${border} rounded-xl p-4 step-enter">
+          <div class="flex items-start gap-3">
+            <div class="w-8 flex justify-center">${left}</div>
+            <div class="flex-1">
+              <div class="font-semibold text-slate-800">${escapeHtml(title)}</div>
+              <div class="text-slate-700 mt-1">${escapeHtml(text)}</div>
+
+              ${
+                showDetails
+                  ? `
+                    <details class="mt-3">
+                      <summary class="cursor-pointer text-sm text-slate-600">Technische details (optioneel)</summary>
+                      <pre class="text-xs mt-2 p-2 bg-white border border-slate-200 rounded overflow-auto">${escapeHtml(JSON.stringify(extra, null, 2))}</pre>
+                    </details>
+                  `
+                  : ''
+              }
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function humanizeStep(step) {
+      const msg = (step.message || '').toLowerCase();
+
+      if (msg.includes('test gestart')) {
+        return {
+          icon: '🚀',
+          title: explainLike5 ? 'We gaan testen!' : 'Test gestart',
+          text: explainLike5
+            ? 'We doen nu het “DAN”-stukje, alsof “WANNEER” al klopt.'
+            : 'We voeren alleen het DAN-gedeelte uit.'
+        };
+      }
+
+      // Alles wat op een opdracht lijkt (ook als backend nog technisch zou zijn)
+      if (msg.includes('opdracht') || msg.includes('roep') || msg.includes('service')) {
+        return {
+          icon: '⚙️',
+          title: explainLike5 ? 'We geven de opdracht' : 'Actie uitvoeren',
+          text: explainLike5
+            ? 'Home Assistant krijgt een seintje: “doe dit nu”.'
+            : 'We geven Home Assistant de opdracht.'
+        };
+      }
+
+      if (msg.includes('antwoord') || msg.includes('response')) {
+        const ok = !!step.ok;
+        if (ok) {
+          return {
+            icon: '✅',
+            title: explainLike5 ? 'Het is gelukt!' : 'Gelukt',
+            text: explainLike5 ? 'Klaar! Het is echt gebeurd.' : 'Home Assistant heeft het uitgevoerd.'
+          };
+        }
+        return {
+          icon: '❌',
+          title: explainLike5 ? 'Oeps… het ging niet' : 'Mislukt',
+          text: explainLike5 ? 'Het lukte niet. Misschien is er iets niet goed ingesteld.' : 'De actie kon niet uitgevoerd worden.'
+        };
+      }
+
+      // fallback
+      const safeText = explainLike5 ? 'We doen een stapje in de test.' : (step.message || '');
+      return { icon: step.ok ? '✅' : '❌', title: step.ok ? 'OK' : 'Niet OK', text: safeText };
+    }
+
+    function renderProgress(host, current, total) {
+      const pct = total <= 0 ? 0 : Math.round((current / total) * 100);
+      host.innerHTML = `
+        <div class="border-2 border-slate-200 bg-white rounded-xl p-4 step-enter">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-lg font-bold text-slate-800">📌 Voortgang</div>
+              <div class="text-sm text-slate-600">Stap ${current} van ${total}</div>
+            </div>
+            <div class="text-sm font-mono text-slate-600">${pct}%</div>
+          </div>
+          <div class="progressbar mt-3"><div style="width:${pct}%"></div></div>
+        </div>
+      `;
+    }
+
+    async function renderVisualRunnerAnimated(steps, automation) {
+      const host = document.getElementById('testSteps');
+      host.innerHTML = '';
+
+      host.innerHTML += renderActionPreviewCard(automation);
+
+      const progressWrap = document.createElement('div');
+      host.appendChild(progressWrap);
+
+      const total = steps.length;
+      let done = 0;
+
+      const cardsWrap = document.createElement('div');
+      cardsWrap.className = 'space-y-2 mt-2';
+      host.appendChild(cardsWrap);
+
+      renderProgress(progressWrap, 0, total);
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const h = humanizeStep(step);
+
+        const pendingHtml = stepCard({ ...h, ok: true, extra: null }, 'pending');
+        const pendingNode = document.createElement('div');
+        pendingNode.innerHTML = pendingHtml;
+        const cardEl = pendingNode.firstElementChild;
+        cardsWrap.appendChild(cardEl);
+
+        await new Promise(r => setTimeout(r, 220));
+
+        cardEl.outerHTML = stepCard({ ...h, ok: true, extra: null }, 'running');
+        const runningEl = cardsWrap.lastElementChild;
+
+        await new Promise(r => setTimeout(r, 420));
+
+        const finalOk = !!step.ok;
+
+        // tech details mogen alleen als ELI5 UIT
+        let finalExtra = null;
+        if (!explainLike5 && step.extra && step.extra.tech) finalExtra = step.extra.tech;
+
+        runningEl.outerHTML = stepCard({ ...h, ok: finalOk, extra: finalExtra }, 'done');
+
+        done++;
+        renderProgress(progressWrap, done, total);
+      }
+
+      const success = steps.every(s => s.ok);
+      const final = document.createElement('div');
+      final.className = 'result-pop mt-2 border-2 rounded-xl p-4 ' + (success ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50');
+      final.innerHTML = `
+        <div class="text-xl font-extrabold ${success ? 'text-green-800' : 'text-red-800'}">
+          ${success ? '🎉 Test is GELUKT' : '⚠️ Test is MISLUKT'}
+        </div>
+        <div class="text-slate-700 mt-1">
+          ${success
+            ? (explainLike5 ? 'Alles ging goed. Klaar!' : 'Alles ging goed: de actie is uitgevoerd.')
+            : (explainLike5 ? 'Het lukte niet. Kijk even naar het rode vakje.' : 'Er ging iets fout. Check de stap met het rode vak.')}
+        </div>
+      `;
+      host.appendChild(final);
+    }
+
+    // ----------------------------
+    // Collect automation from form
+    // ----------------------------
+    function collectAutomationFromForm() {
+      const name = document.getElementById('name').value.trim();
+      const triggerType = document.getElementById('triggerType').value;
+      const actionType = document.getElementById('actionType').value;
+
+      if (!name || !triggerType || !actionType) return { error: 'Vul Naam, WANNEER en DAN in.' };
+
+      let trigger = { type: triggerType };
+      if (triggerType === 'time' || triggerType === 'state') {
+        const v = document.getElementById('triggerValue')?.value;
+        if (!v) return { error: 'Kies een waarde bij WANNEER.' };
+        trigger.value = v;
+      } else if (triggerType === 'sun') {
+        trigger.sunEvent = document.getElementById('sunEvent')?.value || 'sunrise';
+        trigger.sunOffset = document.getElementById('sunOffset')?.value || 'after';
+        trigger.sunMinutes = document.getElementById('sunMinutes')?.value || '0';
+      }
+
+      let action = { type: actionType };
+      if (actionType === 'notify') {
+        const msg = document.getElementById('actionValue')?.value?.trim();
+        if (!msg) return { error: 'Vul een bericht in bij de melding.' };
+        action.value = msg;
+        action.service = document.getElementById('notifyService')?.value || 'notify.notify';
+      } else {
+        const entity = document.getElementById('actionValue')?.value;
+        if (!entity) return { error: 'Kies waar de actie op uitgevoerd moet worden.' };
+        action.value = entity;
+
+        if (actionType === 'turn_on' && isLightEntity(entity)) {
+          const picked = document.getElementById('lightColor')?.value || '#ffffff';
+          const br = document.getElementById('lightBrightness')?.value ?? '255';
+          action.color_rgb = colorHexToRgbArray(picked);
+          action.brightness = parseInt(br, 10);
+        }
+      }
+
+      return { automation: { name, trigger, action } };
+    }
+
+    // ----------------------------
+    // Test run
+    // ----------------------------
+    async function testRun() {
+      hideTest();
+      const panel = document.getElementById('testPanel');
+      panel.classList.remove('hidden');
+
+      const collected = collectAutomationFromForm();
+      if (collected.error) {
+        await renderVisualRunnerAnimated([{ message: collected.error, ok: false }], { action: {} });
+        return;
+      }
+
+      // Pre-run friendly animation
+      await renderVisualRunnerAnimated([
+        { message: "Test gestart: we doen alsof 'WANNEER' klopt en voeren alleen 'DAN' uit.", ok: true },
+        { message: "We geven Home Assistant de opdracht.", ok: true },
+      ], collected.automation);
+
+      await new Promise(r => setTimeout(r, 250));
+
+      try {
+        const resp = await fetch(API_BASE + '/api/test', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(collected)
         });
-        
-        console.log('Response status:', response.status);
-        
-        if (response.ok) {
-            entities = await response.json();
-            console.log('Entities loaded:', entities.length);
-            
-            document.getElementById("status").innerHTML = 
-                '<span class="inline-block w-3 h-3 bg-green-500 rounded-full mr-2"></span>' +
-                '<span class="text-green-700">Verbonden (' + entities.length + ' entities)</span>';
-        } else {
-            const errorText = await response.text();
-            console.error('Response error:', response.status, errorText);
-            throw new Error('HTTP ' + response.status);
-        }
-    } catch (error) {
-        console.error("Connection error:", error);
-        document.getElementById("status").innerHTML = 
-            '<span class="inline-block w-3 h-3 bg-red-500 rounded-full mr-2"></span>' +
-            '<span class="text-red-700">Fout: ' + error.message + '</span>';
-    }
-    
-    loadList();
-}
 
-function entitySelect(id, domains = []) {
-    let filtered = entities;
-    if (domains.length > 0) {
-        filtered = entities.filter(e => domains.includes(e.domain));
-    }
-    
-    let html = '<select id="' + id + '" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">';
-    html += '<option value="">-- Kies een apparaat --</option>';
-    filtered.forEach(e => {
-        html += '<option value="' + e.entity_id + '">' + e.name + ' (' + e.entity_id + ')</option>';
-    });
-    html += '</select>';
-    return html;
-}
+        const result = await resp.json();
 
-function showTrigger() {
-    const type = document.getElementById("triggerType").value;
-    const container = document.getElementById("triggerInputs");
-    
-    if (!type) {
-        container.innerHTML = '';
-        return;
-    }
-    
-    if (type === "time") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Tijdstip:</label><input type="time" id="triggerValue" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-green-500 focus:outline-none"/>';
-    } else if (type === "state") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Apparaat:</label>' + entitySelect("triggerValue");
-    } else if (type === "sun") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Event:</label><select id="triggerValue" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl"><option value="sunrise">Zonsopgang</option><option value="sunset">Zonsondergang</option></select>';
-    } else if (type === "motion") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Bewegingsmelder:</label>' + entitySelect("triggerValue", ["binary_sensor"]);
-    }
-}
+        if (!resp.ok) {
+          await renderVisualRunnerAnimated([{ message: "Test mislukt", ok: false, extra: result }], collected.automation);
+          return;
+        }
 
-function showAction() {
-    const type = document.getElementById("actionType").value;
-    const container = document.getElementById("actionInputs");
-    
-    if (!type) {
-        container.innerHTML = '';
-        return;
-    }
-    
-    if (type === "turn_on" || type === "turn_off") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Apparaat:</label>' + entitySelect("actionValue", ["light", "switch", "fan", "input_boolean"]);
-    } else if (type === "notify") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Notificatie service:</label><select id="notifyService" class="w-full px-4 py-3 mb-3 text-lg border-2 border-gray-300 rounded-xl"><option value="notify.notify">Standaard</option><option value="notify.mobile_app">Mobile app</option></select><label class="block text-sm font-semibold text-gray-700 mb-2">Bericht:</label><input type="text" id="actionValue" placeholder="bijv. Voordeur staat open!" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none"/>';
-    } else if (type === "scene") {
-        container.innerHTML = '<label class="block text-sm font-semibold text-gray-700 mb-2 mt-3">Scene:</label>' + entitySelect("actionValue", ["scene"]);
-    }
-}
+        await renderVisualRunnerAnimated(result.steps || [{ message: "Geen resultaat ontvangen", ok: false }], collected.automation);
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-async function save() {
-    const name = document.getElementById("name").value.trim();
-    const triggerType = document.getElementById("triggerType").value;
-    const triggerValue = document.getElementById("triggerValue")?.value;
-    const actionType = document.getElementById("actionType").value;
-    
-    if (!name) {
-        alert("Vul een naam in!");
-        return;
+      } catch (e) {
+        await renderVisualRunnerAnimated([{ message: "Verbindingsfout", ok: false, extra: { error: e.message } }], collected.automation);
+      }
     }
-    
-    if (!triggerType) {
-        alert("Kies een trigger!");
-        return;
-    }
-    
-    if (!triggerValue) {
-        alert("Vul de trigger waarde in!");
-        return;
-    }
-    
-    if (!actionType) {
-        alert("Kies een actie!");
-        return;
-    }
-    
-    let actionValue = '';
-    let notifyService = 'notify.notify';
-    
-    if (actionType === "notify") {
-        actionValue = document.getElementById("actionValue")?.value.trim();
-        notifyService = document.getElementById("notifyService")?.value || "notify.notify";
-        if (!actionValue) {
-            alert("Vul een bericht in!");
-            return;
-        }
-    } else {
-        actionValue = document.getElementById("actionValue")?.value;
-        if (!actionValue) {
-            alert("Kies een apparaat voor de actie!");
-            return;
-        }
-    }
-    
-    const automationData = {
-        name: name,
-        trigger: {
-            type: triggerType,
-            value: triggerValue
-        },
-        action: {
-            type: actionType,
-            value: actionValue
-        }
-    };
-    
-    if (actionType === "notify") {
-        automationData.action.service = notifyService;
-    }
-    
-    console.log("Sending:", JSON.stringify(automationData, null, 2));
-    
-    try {
-        const response = await fetch(API_BASE + "/api/automation", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                automation: automationData
-            })
+
+    // ----------------------------
+    // Save (create/update)
+    // ----------------------------
+    async function save() {
+      const collected = collectAutomationFromForm();
+      if (collected.error) { alert(collected.error); return; }
+
+      const isUpdate = !!editingFilename;
+      const url = isUpdate ? (API_BASE + '/api/automation/' + editingFilename) : (API_BASE + '/api/automation');
+      const method = isUpdate ? 'PUT' : 'POST';
+
+      try {
+        const response = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(collected)
         });
-        
-        console.log("Save response status:", response.status);
-        
         const result = await response.json();
-        
         if (response.ok) {
-            alert("Automation opgeslagen!");
-            document.getElementById("name").value = "";
-            document.getElementById("triggerType").value = "";
-            document.getElementById("actionType").value = "";
-            document.getElementById("triggerInputs").innerHTML = "";
-            document.getElementById("actionInputs").innerHTML = "";
-            loadList();
+          alert(isUpdate ? 'Automation bijgewerkt! ✅' : 'Automation opgeslagen! ✅');
+          editingFilename = null;
+          hideEditBanner();
+          clearForm();
+          loadList();
         } else {
-            alert("Fout bij opslaan: " + result.error);
+          alert('Fout bij opslaan: ' + (result.error || response.status));
         }
-    } catch (error) {
-        console.error("Save error:", error);
-        alert("Fout bij opslaan: " + error.message);
+      } catch (error) {
+        alert('Fout bij opslaan: ' + error.message);
+      }
     }
-}
 
-async function loadList() {
-    try {
-        const response = await fetch(API_BASE + "/api/automations");
-        
+    // ----------------------------
+    // Edit / Load list / Delete
+    // ----------------------------
+    async function editAuto(filename) {
+      try {
+        const response = await fetch(API_BASE + '/api/automation/' + filename);
+        const result = await response.json();
         if (!response.ok) {
-            console.warn("Could not load automations list");
-            return;
+          alert('Kon automation niet laden: ' + (result.error || response.status));
+          return;
         }
-        
+        const a = result.automation;
+        editingFilename = filename;
+
+        document.getElementById('name').value = a.name || '';
+        document.getElementById('triggerType').value = a.trigger?.type || '';
+        showTrigger(a.trigger);
+
+        document.getElementById('actionType').value = a.action?.type || '';
+        showAction(a.action);
+
+        showEditBanner(filename);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (err) {
+        alert('Fout: ' + err.message);
+      }
+    }
+
+    async function loadList() {
+      try {
+        const response = await fetch(API_BASE + '/api/automations');
+        if (!response.ok) return;
         const automations = await response.json();
-        
-        document.getElementById("count").textContent = automations.length;
-        
+
+        document.getElementById('count').textContent = automations.length;
         if (automations.length === 0) {
-            document.getElementById("list").classList.add("hidden");
-            return;
+          document.getElementById('list').classList.add('hidden');
+          return;
         }
-        
-        document.getElementById("list").classList.remove("hidden");
-        
+        document.getElementById('list').classList.remove('hidden');
+
         let html = '';
         automations.forEach(auto => {
-            html += '<div class="bg-gray-50 rounded-lg p-4 border-2 border-gray-200 flex justify-between items-center">';
-            html += '<div><div class="font-semibold text-lg">' + auto.name + '</div><div class="text-sm text-gray-600">' + auto.filename + '</div></div>';
-            html += '<button onclick="deleteAuto(\'' + auto.filename + '\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors">Verwijder</button>';
-            html += '</div>';
+          html += `
+            <div class="bg-gray-50 rounded-lg p-4 border-2 border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <div class="font-semibold text-lg">${escapeHtml(auto.name)}</div>
+                <div class="text-sm text-gray-600">(bestand: ${escapeHtml(auto.filename)})</div>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="editAuto('${auto.filename}')"
+                        class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors">
+                  ✏️ Bewerk
+                </button>
+                <button onclick="deleteAuto('${auto.filename}')"
+                        class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors">
+                  🗑️ Verwijder
+                </button>
+              </div>
+            </div>
+          `;
         });
-        
-        document.getElementById("items").innerHTML = html;
-    } catch (error) {
-        console.error("Load error:", error);
-    }
-}
+        document.getElementById('items').innerHTML = html;
 
-async function deleteAuto(filename) {
-    if (!confirm("Weet je zeker dat je deze automation wilt verwijderen?")) {
-        return;
+      } catch (error) {}
     }
-    
-    try {
-        const response = await fetch(API_BASE + "/api/automation/" + filename, {
-            method: "DELETE"
-        });
-        
+
+    async function deleteAuto(filename) {
+      if (!confirm('Weet je zeker dat je deze automation wilt verwijderen?')) return;
+      try {
+        const response = await fetch(API_BASE + '/api/automation/' + filename, { method: 'DELETE' });
         if (response.ok) {
-            alert("Automation verwijderd!");
-            loadList();
+          alert('Automation verwijderd! ✅');
+          if (editingFilename === filename) cancelEdit();
+          loadList();
         } else {
-            alert("Fout bij verwijderen");
+          const result = await response.json().catch(() => ({}));
+          alert('Fout bij verwijderen: ' + (result.error || response.status));
         }
-    } catch (error) {
-        alert("Fout: " + error.message);
+      } catch (error) {
+        alert('Fout: ' + error.message);
+      }
     }
-}
 
-// Start when page loads
-console.log('Page loaded, starting init...');
-init();
-</script>
+    // Start
+    init();
+  </script>
 </body>
 </html>

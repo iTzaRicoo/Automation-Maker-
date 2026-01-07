@@ -135,20 +135,35 @@ def get_ha_entities() -> List[Dict[str, str]]:
 # -----------------------------------------------------------------------------
 # YAML <-> UI model conversion
 # -----------------------------------------------------------------------------
-def parse_trigger_from_yaml(trigger_list: Any) -> Dict[str, Any]:
+def parse_trigger_from_yaml(trigger_list: Any, condition_list: Any = None) -> Dict[str, Any]:
     if not trigger_list or not isinstance(trigger_list, list):
         return {"type": "", "value": ""}
 
     t = trigger_list[0] or {}
     platform = t.get("platform", "")
 
+    # Check for weekday condition
+    selected_days = []
+    if condition_list and isinstance(condition_list, list):
+        for cond in condition_list:
+            if isinstance(cond, dict) and cond.get("condition") == "time" and "weekday" in cond:
+                selected_days = cond["weekday"]
+                if isinstance(selected_days, str):
+                    selected_days = [selected_days]
+                break
+
     if platform == "time":
-        return {"type": "time", "value": t.get("at", "")}
+        model = {"type": "time", "value": t.get("at", "")}
+        if selected_days:
+            model["days"] = selected_days
+        return model
 
     if platform == "state":
         model: Dict[str, Any] = {"type": "state", "value": t.get("entity_id", "")}
         if "to" in t:
             model["to"] = t.get("to")
+        if selected_days:
+            model["days"] = selected_days
         return model
 
     if platform == "sun":
@@ -164,6 +179,8 @@ def parse_trigger_from_yaml(trigger_list: Any) -> Dict[str, Any]:
         else:
             model["sunOffset"] = "after"
             model["sunMinutes"] = "0"
+        if selected_days:
+            model["days"] = selected_days
         return model
 
     # Unknown platform fallback
@@ -218,11 +235,14 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
         "alias": name,
         "description": "Aangemaakt met Automation Maker",
         "trigger": [],
+        "condition": [],
         "mode": "single",
     }]
 
     # Trigger
     ttype = trigger.get("type")
+    selected_days = trigger.get("days", [])
+    
     if ttype == "time":
         yaml_data[0]["trigger"].append({"platform": "time", "at": trigger.get("value", "12:00")})
 
@@ -247,6 +267,17 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
     else:
         # safe default
         yaml_data[0]["trigger"].append({"platform": "time", "at": "12:00"})
+
+    # Add weekday condition if days are selected
+    if selected_days and len(selected_days) > 0:
+        yaml_data[0]["condition"].append({
+            "condition": "time",
+            "weekday": selected_days
+        })
+    
+    # Remove condition key if empty
+    if not yaml_data[0]["condition"]:
+        del yaml_data[0]["condition"]
 
     # Action
     atype = action.get("type")
@@ -364,7 +395,7 @@ def api_get_automation(filename: str):
         auto_yaml = yaml_data[0]
         automation = {
             "name": auto_yaml.get("alias", "Onbekend"),
-            "trigger": parse_trigger_from_yaml(auto_yaml.get("trigger", [])),
+            "trigger": parse_trigger_from_yaml(auto_yaml.get("trigger", []), auto_yaml.get("condition", [])),
             "action": parse_action_from_yaml(auto_yaml.get("action", [])),
         }
         return jsonify({"automation": automation, "filename": os.path.basename(filename)})

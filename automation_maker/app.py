@@ -30,12 +30,14 @@ CORS(app)
 HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 AUTOMATIONS_PATH = os.environ.get("AUTOMATIONS_PATH") or os.path.join(HA_CONFIG_PATH, "include", "automations")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 
 Path(AUTOMATIONS_PATH).mkdir(parents=True, exist_ok=True)
 
 print(f"[Automation Maker] Config path: {HA_CONFIG_PATH}")
 print(f"[Automation Maker] Automations path: {AUTOMATIONS_PATH}")
 print(f"[Automation Maker] Supervisor token available: {bool(SUPERVISOR_TOKEN)}")
+print(f"[Automation Maker] Debug mode: {DEBUG_MODE}")
 
 
 # -----------------------------------------------------------------------------
@@ -339,6 +341,7 @@ def api_health():
         "automations_path": AUTOMATIONS_PATH,
         "token": bool(SUPERVISOR_TOKEN),
         "ingress_path": ingress_path(),
+        "debug": DEBUG_MODE,
     })
 
 
@@ -641,5 +644,6 @@ if __name__ == "__main__":
     print(f"Config path: {HA_CONFIG_PATH}")
     print(f"Automations path: {AUTOMATIONS_PATH}")
     print(f"Supervisor token: {'Available' if SUPERVISOR_TOKEN else 'Missing'}")
+    print(f"Debug mode: {DEBUG_MODE}")
     print("=" * 60 + "\n")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=DEBUG_MODE)

@@ -127,6 +127,42 @@
           <option value="sun">Zonsopgang/ondergang</option>
         </select>
         <div id="triggerInputs"></div>
+        
+        <!-- Days selector (shown when trigger is selected) -->
+        <div id="daysSelector" class="hidden mt-4 border-2 border-green-200 bg-white rounded-xl p-4">
+          <label class="block text-sm font-semibold text-gray-700 mb-2">Op welke dagen? (optioneel)</label>
+          <div class="text-xs text-gray-600 mb-3">Selecteer niets voor alle dagen</div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="mon" class="day-checkbox w-4 h-4">
+              <span>Maandag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="tue" class="day-checkbox w-4 h-4">
+              <span>Dinsdag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="wed" class="day-checkbox w-4 h-4">
+              <span>Woensdag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="thu" class="day-checkbox w-4 h-4">
+              <span>Donderdag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="fri" class="day-checkbox w-4 h-4">
+              <span>Vrijdag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="sat" class="day-checkbox w-4 h-4">
+              <span>Zaterdag</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" value="sun" class="day-checkbox w-4 h-4">
+              <span>Zondag</span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <div class="mb-6 bg-blue-50 p-5 rounded-xl">
@@ -272,7 +308,6 @@
                  class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none">`;
       html += '<option value="">-- Kies iets --</option>';
       filtered.forEach(e => {
-        // Toon alleen friendly name (geen entity_id zichtbaar)
         html += `<option value="${e.entity_id}">${escapeHtml(e.name)}</option>`;
       });
       html += '</select>';
@@ -290,7 +325,6 @@
       return 'iets';
     }
 
-    // Convert color input (#rrggbb) -> [r,g,b] for backend
     function colorHexToRgbArray(hex) {
       const v = (hex || '#ffffff').replace('#','');
       const r = parseInt(v.slice(0,2), 16);
@@ -305,8 +339,23 @@
     function showTrigger(prefill = null) {
       const type = prefill?.type ?? document.getElementById('triggerType').value;
       const container = document.getElementById('triggerInputs');
+      const daysSelector = document.getElementById('daysSelector');
 
-      if (!type) { container.innerHTML = ''; return; }
+      if (!type) { 
+        container.innerHTML = ''; 
+        daysSelector.classList.add('hidden');
+        return; 
+      }
+      
+      daysSelector.classList.remove('hidden');
+      
+      if (prefill?.days) {
+        setTimeout(() => {
+          document.querySelectorAll('.day-checkbox').forEach(cb => {
+            cb.checked = prefill.days.includes(cb.value);
+          });
+        }, 0);
+      }
 
       if (type === 'time') {
         const v = prefill?.value ?? '12:00';
@@ -355,7 +404,7 @@
     }
 
     // ----------------------------
-    // Action UI (with color only when light selected)
+    // Action UI
     // ----------------------------
     function renderLightExtras(prefill = null) {
       const b = (prefill?.brightness ?? 255);
@@ -387,7 +436,6 @@
 
       const actionType = document.getElementById('actionType').value;
 
-      // Only show color/brightness for turn_on + light.*
       if (actionType === 'turn_on' && isLightEntity(entityId)) {
         extrasHost.innerHTML = renderLightExtras();
       } else {
@@ -469,6 +517,8 @@
       document.getElementById('actionType').value = '';
       document.getElementById('triggerInputs').innerHTML = '';
       document.getElementById('actionInputs').innerHTML = '';
+      document.getElementById('daysSelector').classList.add('hidden');
+      document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = false);
     }
 
     function cancelEdit() {
@@ -540,7 +590,6 @@
           ? `<div class="spinner mt-1"></div>`
           : `<div class="text-2xl leading-none">${icon}</div>`;
 
-      // In ELI5: nooit tech details tonen
       const showDetails = (!explainLike5 && extra && Object.keys(extra).length);
 
       return `
@@ -549,353 +598,322 @@
             <div class="w-8 flex justify-center">${left}</div>
             <div class="flex-1">
               <div class="font-semibold text-slate-800">${escapeHtml(title)}</div>
-              <div class="text-slate-700 mt-1">${escapeHtml(text)}</div>
-
-              ${
-                showDetails
-                  ? `
-                    <details class="mt-3">
-                      <summary class="cursor-pointer text-sm text-slate-600">Technische details (optioneel)</summary>
-                      <pre class="text-xs mt-2 p-2 bg-white border border-slate-200 rounded overflow-auto">${escapeHtml(JSON.stringify(extra, null, 2))}</pre>
-                    </details>
-                  `
-                  : ''
-              }
+              <div class="text-sm text-slate-600 mt-1">${escapeHtml(text)}</div>
+              ${showDetails ? `
+                <details class="mt-2">
+                  <summary class="text-xs text-slate-500 cursor-pointer hover:text-slate-700">🔧 Technische details</summary>
+                  <pre class="text-xs bg-slate-100 p-2 rounded mt-1 overflow-x-auto">${JSON.stringify(extra, null, 2)}</pre>
+                </details>
+              ` : ''}
             </div>
           </div>
         </div>
       `;
     }
 
-    function humanizeStep(step) {
-      const msg = (step.message || '').toLowerCase();
-
-      if (msg.includes('test gestart')) {
-        return {
-          icon: '🚀',
-          title: explainLike5 ? 'We gaan testen!' : 'Test gestart',
-          text: explainLike5
-            ? 'We doen nu het “DAN”-stukje, alsof “WANNEER” al klopt.'
-            : 'We voeren alleen het DAN-gedeelte uit.'
-        };
-      }
-
-      // Alles wat op een opdracht lijkt (ook als backend nog technisch zou zijn)
-      if (msg.includes('opdracht') || msg.includes('roep') || msg.includes('service')) {
-        return {
-          icon: '⚙️',
-          title: explainLike5 ? 'We geven de opdracht' : 'Actie uitvoeren',
-          text: explainLike5
-            ? 'Home Assistant krijgt een seintje: “doe dit nu”.'
-            : 'We geven Home Assistant de opdracht.'
-        };
-      }
-
-      if (msg.includes('antwoord') || msg.includes('response')) {
-        const ok = !!step.ok;
-        if (ok) {
-          return {
-            icon: '✅',
-            title: explainLike5 ? 'Het is gelukt!' : 'Gelukt',
-            text: explainLike5 ? 'Klaar! Het is echt gebeurd.' : 'Home Assistant heeft het uitgevoerd.'
-          };
-        }
-        return {
-          icon: '❌',
-          title: explainLike5 ? 'Oeps… het ging niet' : 'Mislukt',
-          text: explainLike5 ? 'Het lukte niet. Misschien is er iets niet goed ingesteld.' : 'De actie kon niet uitgevoerd worden.'
-        };
-      }
-
-      // fallback
-      const safeText = explainLike5 ? 'We doen een stapje in de test.' : (step.message || '');
-      return { icon: step.ok ? '✅' : '❌', title: step.ok ? 'OK' : 'Niet OK', text: safeText };
-    }
-
-    function renderProgress(host, current, total) {
-      const pct = total <= 0 ? 0 : Math.round((current / total) * 100);
-      host.innerHTML = `
-        <div class="border-2 border-slate-200 bg-white rounded-xl p-4 step-enter">
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <div class="text-lg font-bold text-slate-800">📌 Voortgang</div>
-              <div class="text-sm text-slate-600">Stap ${current} van ${total}</div>
-            </div>
-            <div class="text-sm font-mono text-slate-600">${pct}%</div>
-          </div>
-          <div class="progressbar mt-3"><div style="width:${pct}%"></div></div>
-        </div>
-      `;
-    }
-
-    async function renderVisualRunnerAnimated(steps, automation) {
-      const host = document.getElementById('testSteps');
-      host.innerHTML = '';
-
-      host.innerHTML += renderActionPreviewCard(automation);
-
-      const progressWrap = document.createElement('div');
-      host.appendChild(progressWrap);
-
-      const total = steps.length;
-      let done = 0;
-
-      const cardsWrap = document.createElement('div');
-      cardsWrap.className = 'space-y-2 mt-2';
-      host.appendChild(cardsWrap);
-
-      renderProgress(progressWrap, 0, total);
-
-      for (let i = 0; i < steps.length; i++) {
-        const step = steps[i];
-        const h = humanizeStep(step);
-
-        const pendingHtml = stepCard({ ...h, ok: true, extra: null }, 'pending');
-        const pendingNode = document.createElement('div');
-        pendingNode.innerHTML = pendingHtml;
-        const cardEl = pendingNode.firstElementChild;
-        cardsWrap.appendChild(cardEl);
-
-        await new Promise(r => setTimeout(r, 220));
-
-        cardEl.outerHTML = stepCard({ ...h, ok: true, extra: null }, 'running');
-        const runningEl = cardsWrap.lastElementChild;
-
-        await new Promise(r => setTimeout(r, 420));
-
-        const finalOk = !!step.ok;
-
-        // tech details mogen alleen als ELI5 UIT
-        let finalExtra = null;
-        if (!explainLike5 && step.extra && step.extra.tech) finalExtra = step.extra.tech;
-
-        runningEl.outerHTML = stepCard({ ...h, ok: finalOk, extra: finalExtra }, 'done');
-
-        done++;
-        renderProgress(progressWrap, done, total);
-      }
-
-      const success = steps.every(s => s.ok);
-      const final = document.createElement('div');
-      final.className = 'result-pop mt-2 border-2 rounded-xl p-4 ' + (success ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50');
-      final.innerHTML = `
-        <div class="text-xl font-extrabold ${success ? 'text-green-800' : 'text-red-800'}">
-          ${success ? '🎉 Test is GELUKT' : '⚠️ Test is MISLUKT'}
-        </div>
-        <div class="text-slate-700 mt-1">
-          ${success
-            ? (explainLike5 ? 'Alles ging goed. Klaar!' : 'Alles ging goed: de actie is uitgevoerd.')
-            : (explainLike5 ? 'Het lukte niet. Kijk even naar het rode vakje.' : 'Er ging iets fout. Check de stap met het rode vak.')}
-        </div>
-      `;
-      host.appendChild(final);
-    }
-
     // ----------------------------
-    // Collect automation from form
+    // Save automation
     // ----------------------------
-    function collectAutomationFromForm() {
+    function readFormData() {
       const name = document.getElementById('name').value.trim();
       const triggerType = document.getElementById('triggerType').value;
       const actionType = document.getElementById('actionType').value;
 
-      if (!name || !triggerType || !actionType) return { error: 'Vul Naam, WANNEER en DAN in.' };
+      if (!name) {
+        alert('Vul eerst een naam in!');
+        return null;
+      }
+      if (!triggerType) {
+        alert('Kies eerst WANNEER!');
+        return null;
+      }
+      if (!actionType) {
+        alert('Kies eerst DAN!');
+        return null;
+      }
 
-      let trigger = { type: triggerType };
-      if (triggerType === 'time' || triggerType === 'state') {
-        const v = document.getElementById('triggerValue')?.value;
-        if (!v) return { error: 'Kies een waarde bij WANNEER.' };
-        trigger.value = v;
+      const trigger = { type: triggerType };
+      
+      // Get selected days
+      const selectedDays = Array.from(document.querySelectorAll('.day-checkbox:checked')).map(cb => cb.value);
+      if (selectedDays.length > 0) {
+        trigger.days = selectedDays;
+      }
+
+      if (triggerType === 'time') {
+        trigger.value = document.getElementById('triggerValue')?.value || '12:00';
+      } else if (triggerType === 'state') {
+        trigger.value = document.getElementById('triggerValue')?.value || '';
+        if (!trigger.value) {
+          alert('Kies eerst wat er moet veranderen bij WANNEER!');
+          return null;
+        }
       } else if (triggerType === 'sun') {
         trigger.sunEvent = document.getElementById('sunEvent')?.value || 'sunrise';
         trigger.sunOffset = document.getElementById('sunOffset')?.value || 'after';
         trigger.sunMinutes = document.getElementById('sunMinutes')?.value || '0';
       }
 
-      let action = { type: actionType };
-      if (actionType === 'notify') {
-        const msg = document.getElementById('actionValue')?.value?.trim();
-        if (!msg) return { error: 'Vul een bericht in bij de melding.' };
-        action.value = msg;
+      const action = { type: actionType };
+
+      if (actionType === 'turn_on' || actionType === 'turn_off') {
+        action.value = document.getElementById('actionValue')?.value || '';
+        if (!action.value) {
+          alert('Kies eerst wat er aan/uit moet bij DAN!');
+          return null;
+        }
+
+        if (actionType === 'turn_on' && isLightEntity(action.value)) {
+          const colorHex = document.getElementById('lightColor')?.value;
+          if (colorHex) {
+            action.color_rgb = colorHexToRgbArray(colorHex);
+            action.colorPickerValue = colorHex;
+          }
+          const brightness = document.getElementById('lightBrightness')?.value;
+          if (brightness !== undefined && brightness !== '') {
+            action.brightness = parseInt(brightness);
+          }
+        }
+      } else if (actionType === 'notify') {
+        action.value = document.getElementById('actionValue')?.value || '';
         action.service = document.getElementById('notifyService')?.value || 'notify.notify';
-      } else {
-        const entity = document.getElementById('actionValue')?.value;
-        if (!entity) return { error: 'Kies waar de actie op uitgevoerd moet worden.' };
-        action.value = entity;
-
-        if (actionType === 'turn_on' && isLightEntity(entity)) {
-          const picked = document.getElementById('lightColor')?.value || '#ffffff';
-          const br = document.getElementById('lightBrightness')?.value ?? '255';
-          action.color_rgb = colorHexToRgbArray(picked);
-          action.brightness = parseInt(br, 10);
+        if (!action.value.trim()) {
+          alert('Vul eerst een tekst in voor de melding!');
+          return null;
+        }
+      } else if (actionType === 'scene') {
+        action.value = document.getElementById('actionValue')?.value || '';
+        if (!action.value) {
+          alert('Vul eerst een scene in!');
+          return null;
         }
       }
 
-      return { automation: { name, trigger, action } };
+      return { name, trigger, action };
     }
 
-    // ----------------------------
-    // Test run
-    // ----------------------------
-    async function testRun() {
-      hideTest();
-      const panel = document.getElementById('testPanel');
-      panel.classList.remove('hidden');
-
-      const collected = collectAutomationFromForm();
-      if (collected.error) {
-        await renderVisualRunnerAnimated([{ message: collected.error, ok: false }], { action: {} });
-        return;
-      }
-
-      // Pre-run friendly animation
-      await renderVisualRunnerAnimated([
-        { message: "Test gestart: we doen alsof 'WANNEER' klopt en voeren alleen 'DAN' uit.", ok: true },
-        { message: "We geven Home Assistant de opdracht.", ok: true },
-      ], collected.automation);
-
-      await new Promise(r => setTimeout(r, 250));
-
-      try {
-        const resp = await fetch(API_BASE + '/api/test', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify(collected)
-        });
-
-        const result = await resp.json();
-
-        if (!resp.ok) {
-          await renderVisualRunnerAnimated([{ message: "Test mislukt", ok: false, extra: result }], collected.automation);
-          return;
-        }
-
-        await renderVisualRunnerAnimated(result.steps || [{ message: "Geen resultaat ontvangen", ok: false }], collected.automation);
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-      } catch (e) {
-        await renderVisualRunnerAnimated([{ message: "Verbindingsfout", ok: false, extra: { error: e.message } }], collected.automation);
-      }
-    }
-
-    // ----------------------------
-    // Save (create/update)
-    // ----------------------------
     async function save() {
-      const collected = collectAutomationFromForm();
-      if (collected.error) { alert(collected.error); return; }
+      const automation = readFormData();
+      if (!automation) return;
 
-      const isUpdate = !!editingFilename;
-      const url = isUpdate ? (API_BASE + '/api/automation/' + editingFilename) : (API_BASE + '/api/automation');
-      const method = isUpdate ? 'PUT' : 'POST';
+      log(`Saving automation: ${automation.name}`, 'info');
 
       try {
+        const isEdit = !!editingFilename;
+        const url = isEdit
+          ? `${API_BASE}/api/automation/${editingFilename}`
+          : `${API_BASE}/api/automation`;
+        const method = isEdit ? 'PUT' : 'POST';
+
         const response = await fetch(url, {
           method,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(collected)
+          body: JSON.stringify({ automation }),
         });
+
         const result = await response.json();
+
         if (response.ok) {
-          alert(isUpdate ? 'Automation bijgewerkt! ✅' : 'Automation opgeslagen! ✅');
+          log(`Success: ${result.message}`, 'success');
+          alert(result.message);
+          clearForm();
           editingFilename = null;
           hideEditBanner();
-          clearForm();
           loadList();
         } else {
-          alert('Fout bij opslaan: ' + (result.error || response.status));
+          log(`Error: ${result.error}`, 'error');
+          alert(`Fout: ${result.error}`);
         }
       } catch (error) {
-        alert('Fout bij opslaan: ' + error.message);
+        log(`Save failed: ${error.message}`, 'error');
+        alert(`Fout bij opslaan: ${error.message}`);
       }
     }
 
     // ----------------------------
-    // Edit / Load list / Delete
+    // Test automation
     // ----------------------------
-    async function editAuto(filename) {
+    async function testRun() {
+      const automation = readFormData();
+      if (!automation) return;
+
+      log(`Testing automation: ${automation.name}`, 'info');
+
+      const panel = document.getElementById('testPanel');
+      const stepsContainer = document.getElementById('testSteps');
+      panel.classList.remove('hidden');
+      stepsContainer.innerHTML = renderActionPreviewCard(automation);
+
       try {
-        const response = await fetch(API_BASE + '/api/automation/' + filename);
+        const pendingCard = stepCard(
+          { icon: '⏳', title: 'Bezig...', text: 'We sturen de test naar Home Assistant.', ok: true, extra: {} },
+          'running'
+        );
+        stepsContainer.insertAdjacentHTML('beforeend', pendingCard);
+
+        const response = await fetch(`${API_BASE}/api/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ automation }),
+        });
+
         const result = await response.json();
-        if (!response.ok) {
-          alert('Kon automation niet laden: ' + (result.error || response.status));
-          return;
+
+        stepsContainer.innerHTML = renderActionPreviewCard(automation);
+
+        if (response.ok && result.steps) {
+          result.steps.forEach(step => {
+            const icon = step.ok ? '✅' : '❌';
+            const card = stepCard({
+              icon,
+              title: step.ok ? 'Gelukt' : 'Mislukt',
+              text: step.message,
+              ok: step.ok,
+              extra: step.extra || {}
+            });
+            stepsContainer.insertAdjacentHTML('beforeend', card);
+          });
+          log('Test completed', result.success ? 'success' : 'warn');
+        } else {
+          const errorCard = stepCard({
+            icon: '❌',
+            title: 'Fout',
+            text: result.error || 'Onbekende fout',
+            ok: false,
+            extra: {}
+          });
+          stepsContainer.insertAdjacentHTML('beforeend', errorCard);
+          log(`Test error: ${result.error}`, 'error');
         }
-        const a = result.automation;
-        editingFilename = filename;
-
-        document.getElementById('name').value = a.name || '';
-        document.getElementById('triggerType').value = a.trigger?.type || '';
-        showTrigger(a.trigger);
-
-        document.getElementById('actionType').value = a.action?.type || '';
-        showAction(a.action);
-
-        showEditBanner(filename);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } catch (err) {
-        alert('Fout: ' + err.message);
+      } catch (error) {
+        stepsContainer.innerHTML = renderActionPreviewCard(automation);
+        const errorCard = stepCard({
+          icon: '❌',
+          title: 'Verbindingsfout',
+          text: error.message,
+          ok: false,
+          extra: {}
+        });
+        stepsContainer.insertAdjacentHTML('beforeend', errorCard);
+        log(`Test failed: ${error.message}`, 'error');
       }
     }
 
+    // ----------------------------
+    // List automations
+    // ----------------------------
     async function loadList() {
       try {
-        const response = await fetch(API_BASE + '/api/automations');
-        if (!response.ok) return;
-        const automations = await response.json();
+        const response = await fetch(`${API_BASE}/api/automations`);
+        const files = await response.json();
 
-        document.getElementById('count').textContent = automations.length;
-        if (automations.length === 0) {
-          document.getElementById('list').classList.add('hidden');
+        const listEl = document.getElementById('list');
+        const countEl = document.getElementById('count');
+        const itemsEl = document.getElementById('items');
+
+        countEl.textContent = files.length;
+
+        if (files.length === 0) {
+          listEl.classList.add('hidden');
+          log('No automations found', 'info');
           return;
         }
-        document.getElementById('list').classList.remove('hidden');
 
-        let html = '';
-        automations.forEach(auto => {
-          html += `
-            <div class="bg-gray-50 rounded-lg p-4 border-2 border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div>
-                <div class="font-semibold text-lg">${escapeHtml(auto.name)}</div>
-                <div class="text-sm text-gray-600">(bestand: ${escapeHtml(auto.filename)})</div>
+        listEl.classList.remove('hidden');
+        itemsEl.innerHTML = '';
+
+        files.forEach(file => {
+          const card = document.createElement('div');
+          card.className = 'border-2 border-gray-200 rounded-xl p-4 hover:border-blue-300 transition-colors';
+          card.innerHTML = `
+            <div class="flex items-center justify-between">
+              <div class="flex-1">
+                <div class="font-semibold text-gray-800">${escapeHtml(file.name)}</div>
+                <div class="text-xs text-gray-500 font-mono mt-1">${escapeHtml(file.filename)}</div>
               </div>
               <div class="flex gap-2">
-                <button onclick="editAuto('${auto.filename}')"
-                        class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors">
-                  ✏️ Bewerk
+                <button onclick="editAutomation('${escapeHtml(file.filename)}')"
+                        class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors">
+                  ✏️ Bewerken
                 </button>
-                <button onclick="deleteAuto('${auto.filename}')"
+                <button onclick="deleteAutomation('${escapeHtml(file.filename)}')"
                         class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors">
-                  🗑️ Verwijder
+                  🗑️ Verwijderen
                 </button>
               </div>
             </div>
           `;
+          itemsEl.appendChild(card);
         });
-        document.getElementById('items').innerHTML = html;
 
-      } catch (error) {}
-    }
-
-    async function deleteAuto(filename) {
-      if (!confirm('Weet je zeker dat je deze automation wilt verwijderen?')) return;
-      try {
-        const response = await fetch(API_BASE + '/api/automation/' + filename, { method: 'DELETE' });
-        if (response.ok) {
-          alert('Automation verwijderd! ✅');
-          if (editingFilename === filename) cancelEdit();
-          loadList();
-        } else {
-          const result = await response.json().catch(() => ({}));
-          alert('Fout bij verwijderen: ' + (result.error || response.status));
-        }
+        log(`Loaded ${files.length} automations`, 'success');
       } catch (error) {
-        alert('Fout: ' + error.message);
+        log(`Failed to load list: ${error.message}`, 'error');
       }
     }
 
-    // Start
-    init();
+    async function editAutomation(filename) {
+      try {
+        log(`Loading automation for edit: ${filename}`, 'info');
+        const response = await fetch(`${API_BASE}/api/automation/${filename}`);
+        const result = await response.json();
+
+        if (!response.ok) {
+          alert(`Fout: ${result.error}`);
+          return;
+        }
+
+        const automation = result.automation;
+        editingFilename = result.filename;
+
+        document.getElementById('name').value = automation.name;
+        document.getElementById('triggerType').value = automation.trigger.type;
+        showTrigger(automation.trigger);
+
+        document.getElementById('actionType').value = automation.action.type;
+        showAction(automation.action);
+
+        showEditBanner(result.filename);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+
+        log(`Edit mode: ${filename}`, 'info');
+      } catch (error) {
+        log(`Edit failed: ${error.message}`, 'error');
+        alert(`Fout bij laden: ${error.message}`);
+      }
+    }
+
+    async function deleteAutomation(filename) {
+      if (!confirm(`Weet je zeker dat je "${filename}" wilt verwijderen?`)) {
+        return;
+      }
+
+      try {
+        log(`Deleting automation: ${filename}`, 'warn');
+        const response = await fetch(`${API_BASE}/api/automation/${filename}`, {
+          method: 'DELETE',
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          log(`Deleted: ${filename}`, 'success');
+          alert(result.message);
+          loadList();
+        } else {
+          log(`Delete error: ${result.error}`, 'error');
+          alert(`Fout: ${result.error}`);
+        }
+      } catch (error) {
+        log(`Delete failed: ${error.message}`, 'error');
+        alert(`Fout bij verwijderen: ${error.message}`);
+      }
+    }
+
+    // ----------------------------
+    // Init on page load
+    // ----------------------------
+    window.addEventListener('DOMContentLoaded', init);
   </script>
 </body>
 </html>

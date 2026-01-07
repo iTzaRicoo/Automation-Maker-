@@ -10,16 +10,12 @@ RUN apk add --no-cache \
     pyyaml==6.0.1 \
     requests==2.31.0
 
-COPY automation_maker/main.py /app.py
-COPY automation_maker/index.html /index.html
+COPY main.py /app.py
+COPY index.html /index.html
 COPY run.sh /run.sh
 
 RUN chmod a+x /run.sh
 
 WORKDIR /
 
-# ❌ VERWIJDER deze regel:
-# ENTRYPOINT ["/init"]
-
-# ✅ Alleen CMD gebruiken:
 CMD [ "/run.sh" ]

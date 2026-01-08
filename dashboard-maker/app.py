@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
-APP_VERSION = "2.1.0-dashboard-maker+filters+floors+dual"
+APP_VERSION = "2.1.1-dashboard-maker+fixed-html"
 APP_NAME = "Mushroom Dashboard Maker"
 
 app = Flask(__name__)
@@ -107,7 +107,7 @@ def is_safe_filename(filename: str) -> bool:
 def list_yaml_files(dir_path: str) -> List[str]:
     if not os.path.exists(dir_path):
         return []
-    out = []
+    out: List[str] = []
     for fn in os.listdir(dir_path):
         if fn.endswith(".yaml") and is_safe_filename(fn):
             out.append(fn)
@@ -151,12 +151,12 @@ def ha_call_service(domain: str, service: str, data: dict | None = None) -> Tupl
 
 def get_states() -> List[Dict[str, Any]]:
     if not SUPERVISOR_TOKEN:
-        # demo
         return [
             {"entity_id": "light.woonkamer", "state": "off", "attributes": {"friendly_name": "Woonkamer Lamp"}},
-            {"entity_id": "sensor.temp_woonkamer", "state": "21.1", "attributes": {"friendly_name": "Temp Woonkamer", "unit_of_measurement": "°C"}},
-            {"entity_id": "sensor.woonkamer_rssi", "state": "-62", "attributes": {"friendly_name": "Woonkamer RSSI", "unit_of_measurement": "dBm"}},
+            {"entity_id": "sensor.temp_woonkamer", "state": "21.1", "attributes": {"friendly_name": "Temp Woonkamer", "unit_of_measurement": "°C", "device_class": "temperature"}},
+            {"entity_id": "sensor.woonkamer_rssi", "state": "-62", "attributes": {"friendly_name": "Woonkamer RSSI", "unit_of_measurement": "dBm", "device_class": "signal_strength"}},
             {"entity_id": "binary_sensor.deur_voordeur", "state": "off", "attributes": {"friendly_name": "Voordeur"}},
+            {"entity_id": "scene.nacht", "state": "scening", "attributes": {"friendly_name": "Nacht"}},
         ]
     try:
         resp = ha_request("GET", "/api/states", timeout=12)
@@ -188,6 +188,7 @@ def get_entity_registry() -> List[Dict[str, Any]]:
             {"entity_id": "sensor.temp_woonkamer", "area_id": "woonkamer"},
             {"entity_id": "sensor.woonkamer_rssi", "area_id": "woonkamer"},
             {"entity_id": "binary_sensor.deur_voordeur", "area_id": None},
+            {"entity_id": "scene.nacht", "area_id": None},
         ]
     try:
         resp = ha_request("GET", "/api/config/entity_registry", timeout=12)
@@ -235,24 +236,18 @@ DEFAULT_IGNORE_ENTITY_ID_SUFFIXES = [
     "_rssi", "_linkquality", "_lqi", "_signal_strength", "_signal", "_snr",
     "_last_seen", "_lastseen", "_lastupdate",
     "_uptime", "_available", "_availability",
-    "_battery", "_battery_level",
-    "_pressure",  # often noisy if you don't need it; remove if you want it
 ]
 DEFAULT_IGNORE_ENTITY_ID_CONTAINS = [
-    "linkquality", "rssi", "lqi", "snr", "signal", "last_seen", "lastseen", "uptime", "battery",
+    "linkquality", "rssi", "lqi", "snr", "signal", "last_seen", "lastseen", "uptime",
     "diagnostic", "debug", "heap", "stack", "watchdog",
 ]
-DEFAULT_IGNORE_DEVICE_CLASSES = {
-    # Keep these if you *do* want them; we exclude because they spam dashboards for beginners
-    "signal_strength",
+DEFAULT_IGNORE_DEVICE_CLASSES = {"signal_strength"}
+DEFAULT_ALLOWED_DOMAINS = {
+    "light", "switch", "climate", "media_player", "cover", "lock", "person",
+    "binary_sensor", "sensor", "scene", "script"
 }
-DEFAULT_ALLOWED_DOMAINS = {"light", "switch", "climate", "media_player", "cover", "lock", "person", "binary_sensor", "sensor"}
 
 def is_ignored_entity(e: Dict[str, Any], advanced: bool) -> bool:
-    """
-    advanced=False => stricter filtering (Simpel dashboard)
-    advanced=True  => a bit more permissive (Uitgebreid dashboard)
-    """
     eid = e.get("entity_id", "")
     dom = e.get("domain", "")
     name = norm(e.get("name", ""))
@@ -260,11 +255,9 @@ def is_ignored_entity(e: Dict[str, Any], advanced: bool) -> bool:
     if dom not in DEFAULT_ALLOWED_DOMAINS:
         return True
 
-    # never show these domains for beginner dashboards
-    if dom in {"automation", "script", "scene", "update"}:
+    if dom in {"update"}:
         return True
 
-    # filter common noise sensors
     if dom == "sensor":
         low = eid.lower()
         for suf in DEFAULT_IGNORE_ENTITY_ID_SUFFIXES:
@@ -273,16 +266,11 @@ def is_ignored_entity(e: Dict[str, Any], advanced: bool) -> bool:
         for needle in DEFAULT_IGNORE_ENTITY_ID_CONTAINS:
             if needle in low:
                 return True
-        # name-based filter (covers weird entity ids)
-        for needle in ["rssi", "linkquality", "lqi", "snr", "signal", "uptime", "battery", "diagnostic", "debug"]:
+        for needle in ["rssi", "linkquality", "lqi", "snr", "signal", "uptime", "diagnostic", "debug"]:
             if needle in name:
                 return True
-
-        # device_class specific
         if (e.get("device_class") in DEFAULT_IGNORE_DEVICE_CLASSES) and not advanced:
             return True
-
-        # For "Simpel": only keep sensors that have a unit or a device_class (more meaningful)
         if not advanced:
             if not e.get("unit") and not e.get("device_class"):
                 return True
@@ -291,10 +279,8 @@ def is_ignored_entity(e: Dict[str, Any], advanced: bool) -> bool:
 
 def smart_filter_entities(entities: List[Dict[str, Any]], advanced: bool) -> List[Dict[str, Any]]:
     out = [e for e in entities if not is_ignored_entity(e, advanced=advanced)]
-    # prevent sensor overload
     sensors = [e for e in out if e["domain"] == "sensor"]
     if not advanced and len(sensors) > 24:
-        # keep most meaningful sensors first: those with unit + device_class
         def score(x: Dict[str, Any]) -> int:
             sc = 0
             if x.get("unit"): sc += 2
@@ -304,7 +290,6 @@ def smart_filter_entities(entities: List[Dict[str, Any]], advanced: bool) -> Lis
         sensors_sorted = sorted(sensors, key=score, reverse=True)[:24]
         non = [e for e in out if e["domain"] != "sensor"]
         out = non + sensors_sorted
-
     return sorted(out, key=lambda x: norm(x.get("name") or x["entity_id"]))
 
 # -------------------------
@@ -312,7 +297,7 @@ def smart_filter_entities(entities: List[Dict[str, Any]], advanced: bool) -> Lis
 # -------------------------
 FLOOR_KEYWORDS = {
     "beneden": ["beneden", "begane grond", "bg", "downstairs", "ground floor", "vloer 0", "0e verdieping"],
-    "boven": ["boven", "1e verdieping", "eerste verdieping", "2e verdieping", "verdieping", "upstairs", "floor 1", "floor 2"],
+    "boven": ["boven", "1e verdieping", "eerste verdieping", "2e verdieping", "upstairs", "floor 1", "floor 2"],
 }
 
 def guess_floor_for_area(area_name: str) -> Optional[str]:
@@ -323,7 +308,6 @@ def guess_floor_for_area(area_name: str) -> Optional[str]:
     return None
 
 def guess_floor_for_entity_name(entity_name: str) -> Optional[str]:
-    # fallback only (if areas aren't labeled)
     n = norm(entity_name)
     for floor, keys in FLOOR_KEYWORDS.items():
         if any(k in n for k in keys):
@@ -417,17 +401,29 @@ def card_for_entity(e: Dict[str, Any], advanced: bool) -> Optional[Dict[str, Any
     if domain in {"binary_sensor", "sensor"}:
         return {"type": "custom:mushroom-entity-card", "entity": eid, "tap_action": {"action": "more-info"}}
 
+    # scenes/scripts are used only for "Nachtmodus" detection; not shown as cards here.
     return None
 
 # -------------------------
-# Top actions (buttons that call services)
+# Grouping
+# -------------------------
+def group_entities_by_area(entities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for e in entities:
+        aid = e.get("area_id") or "_no_area_"
+        groups.setdefault(aid, []).append(e)
+    for aid in groups:
+        groups[aid] = sorted(groups[aid], key=lambda x: norm(x.get("name") or x["entity_id"]))
+    return groups
+
+# -------------------------
+# Top actions
 # -------------------------
 def build_top_actions_cards(
     all_entities: List[Dict[str, Any]],
     areas: List[Dict[str, Any]],
     grouped_by_area: Dict[str, List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    # Determine lights by floor using area naming first
     area_by_id = {a.get("area_id"): a for a in areas if a.get("area_id")}
     lights_beneden: List[str] = []
     lights_boven: List[str] = []
@@ -452,17 +448,12 @@ def build_top_actions_cards(
                 lights_boven.append(eid)
 
     def btn(primary: str, icon: str, service: str, data: Dict[str, Any], secondary: str = "") -> Dict[str, Any]:
-        dom, srv = service.split(".", 1)
         return {
             "type": "custom:mushroom-template-card",
             "primary": primary,
             "secondary": secondary,
             "icon": icon,
-            "tap_action": {
-                "action": "call-service",
-                "service": service,
-                "data": data,
-            },
+            "tap_action": {"action": "call-service", "service": service, "data": data},
         }
 
     buttons: List[Dict[str, Any]] = []
@@ -492,15 +483,16 @@ def build_top_actions_cards(
             "Zet alle lampen uit",
         ))
 
-    # Nachtmodus: best-effort → als er een scene of script bestaat met “nacht” in de naam, toon die knop.
     night_scene = None
     night_script = None
     for e in all_entities:
         if e["entity_id"].startswith("scene.") and "nacht" in norm(e.get("name") or e["entity_id"]):
-            night_scene = e["entity_id"]; break
+            night_scene = e["entity_id"]
+            break
     for e in all_entities:
         if e["entity_id"].startswith("script.") and "nacht" in norm(e.get("name") or e["entity_id"]):
-            night_script = e["entity_id"]; break
+            night_script = e["entity_id"]
+            break
 
     if night_scene:
         buttons.append(btn(
@@ -519,11 +511,10 @@ def build_top_actions_cards(
             "Start script",
         ))
     else:
-        # fallback: only dim/turn off some lights is too risky; leave a “hint” card
         buttons.append({
             "type": "custom:mushroom-template-card",
             "primary": "Nachtmodus",
-            "secondary": "Tip: maak een Scene/Script met ‘nacht’ in de naam, dan verschijnt hier een knop.",
+            "secondary": "Tip: maak een Scene/Script met ‘nacht’ in de naam.",
             "icon": "mdi:weather-night",
             "tap_action": {"action": "more-info"},
         })
@@ -534,17 +525,8 @@ def build_top_actions_cards(
     ]
 
 # -------------------------
-# Dashboard building
+# Views
 # -------------------------
-def group_entities_by_area(entities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    groups: Dict[str, List[Dict[str, Any]]] = {}
-    for e in entities:
-        aid = e.get("area_id") or "_no_area_"
-        groups.setdefault(aid, []).append(e)
-    for aid in groups:
-        groups[aid] = sorted(groups[aid], key=lambda x: norm(x.get("name") or x["entity_id"]))
-    return groups
-
 def build_overview_view(
     all_entities: List[Dict[str, Any]],
     areas: List[Dict[str, Any]],
@@ -559,7 +541,6 @@ def build_overview_view(
         tap_action={"action": "navigate", "navigation_path": "/lovelace/0"},
     ))
 
-    # show a couple of "nice" chips if exist
     for dom, icon in [("climate", "mdi:thermostat"), ("media_player", "mdi:play"), ("lock", "mdi:lock")]:
         for e in all_entities:
             if e["domain"] == dom:
@@ -580,7 +561,6 @@ def build_overview_view(
         _m_chips(chips),
     ]
 
-    # Top actions section
     cards.extend(build_top_actions_cards(all_entities, areas, grouped))
 
     if lights:
@@ -641,7 +621,7 @@ def build_area_view(area: Dict[str, Any], entities: List[Dict[str, Any]], advanc
         cards.append(_stack([card_for_entity(e, advanced) for e in climates if card_for_entity(e, advanced)]))
 
     if covers and advanced:
-        cards.append(_m_title("Covers"))
+        cards.append(_m_title("Rolluiken / Gordijnen"))
         cards.append(_grid([card_for_entity(e, advanced) for e in covers if card_for_entity(e, advanced)], columns_mobile=2))
 
     if media and advanced:
@@ -667,17 +647,17 @@ def build_no_area_view(entities: List[Dict[str, Any]], advanced: bool) -> Option
         return None
     cards: List[Dict[str, Any]] = [
         _m_title("Overig", "Entities zonder ruimte. Tip: geef ze een Area in HA."),
-        _grid([card_for_entity(e, advanced) for e in entities if card_for_entity(e, advanced)], columns_mobile=2),
     ]
+    cards_grid = [card_for_entity(e, advanced) for e in entities if card_for_entity(e, advanced)]
+    if cards_grid:
+        cards.append(_grid(cards_grid, columns_mobile=2))
     return {"title": "Overig", "path": "overig", "icon": "mdi:dots-horizontal", "cards": cards}
 
 def build_floor_lights_view(
     floor_name: str,
-    all_entities: List[Dict[str, Any]],
     areas: List[Dict[str, Any]],
     grouped: Dict[str, List[Dict[str, Any]]],
 ) -> Optional[Dict[str, Any]]:
-    # floor_name: "beneden" or "boven"
     area_by_id = {a.get("area_id"): a for a in areas if a.get("area_id")}
     floor_lights: List[Dict[str, Any]] = []
 
@@ -688,7 +668,6 @@ def build_floor_lights_view(
         for e in ents:
             if e["domain"] != "light":
                 continue
-            # prefer area floor
             f = area_floor or guess_floor_for_entity_name(e.get("name") or "")
             if f == floor_name:
                 floor_lights.append(e)
@@ -707,6 +686,9 @@ def build_floor_lights_view(
     ]
     return {"title": title, "path": path, "icon": icon, "cards": cards}
 
+# -------------------------
+# Dashboard building
+# -------------------------
 def build_dashboard_yaml(
     dashboard_title: str,
     include_overig: bool = True,
@@ -715,7 +697,6 @@ def build_dashboard_yaml(
     selected_area_ids: Optional[List[str]] = None,
     advanced: bool = False,
 ) -> Dict[str, Any]:
-    # Get and filter entities
     raw_entities = build_entities_enriched()
     entities = smart_filter_entities(raw_entities, advanced=advanced)
 
@@ -727,14 +708,14 @@ def build_dashboard_yaml(
     if include_overview:
         views.append(build_overview_view(entities, areas, grouped, advanced=advanced))
 
-    # floor tabs (lights only) – always nice, and safe
     if include_floor_light_tabs:
-        v1 = build_floor_lights_view("beneden", entities, areas, grouped)
-        v2 = build_floor_lights_view("boven", entities, areas, grouped)
-        if v1: views.append(v1)
-        if v2: views.append(v2)
+        v1 = build_floor_lights_view("beneden", areas, grouped)
+        v2 = build_floor_lights_view("boven", areas, grouped)
+        if v1:
+            views.append(v1)
+        if v2:
+            views.append(v2)
 
-    # areas in stable order
     ordered_areas = sorted([a for a in areas if a.get("area_id")], key=lambda x: norm(x.get("name") or ""))
 
     for a in ordered_areas:
@@ -755,7 +736,7 @@ def build_dashboard_yaml(
 
 def build_configuration_snippet(dashboard_file: str, title: str) -> str:
     dash_slug = sanitize_filename(title)
-    snippet = f"""
+    snippet = """
 lovelace:
   mode: storage
 
@@ -766,15 +747,15 @@ lovelace:
       icon: mdi:view-dashboard
       show_in_sidebar: true
       filename: dashboards/{dashboard_file}
-"""
+""".format(dash_slug=dash_slug, title=title.replace('"', '\\"'), dashboard_file=dashboard_file)
     return snippet.strip() + "\n"
 
 # -------------------------
-# Web UI (wizard)
+# Web UI (wizard) - IMPORTANT: NOT an f-string
 # -------------------------
 @app.route("/")
 def index():
-    html = f"""<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
@@ -926,19 +907,19 @@ def index():
   let selectedAreas = [];
   const API_BASE = window.location.pathname.replace(/\\/$/, '');
 
-  function setStatus(text, color = 'gray') {
+  function setStatus(text, color = 'gray') {{
     document.getElementById('status').innerHTML =
       '<span class="inline-block w-3 h-3 bg-' + color + '-500 rounded-full mr-2"></span>' +
       '<span class="text-' + color + '-700">' + text + '</span>';
-  }
+  }}
 
-  function escapeHtml(str) {
+  function escapeHtml(str) {{
     return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
+  }}
 
-  async function init() {
+  async function init() {{
     setStatus('Verbinden...', 'yellow');
-    try {
+    try {{
       const cfgRes = await fetch(API_BASE + '/api/config');
       const cfg = await cfgRes.json();
       if (!cfg.token_configured) document.getElementById('tokenWarning').classList.remove('hidden');
@@ -949,24 +930,24 @@ def index():
 
       document.getElementById('previewSimple').textContent = '# Vul een naam in en klik Preview.';
       document.getElementById('previewAdvanced').textContent = '# Vul een naam in en klik Preview.';
-      document.getElementById('configSnippet').textContent = '# Na opslaan komt hier de snippets.';
+      document.getElementById('configSnippet').textContent = '# Na preview/opslaan komt hier de snippets.';
       setStatus('Verbonden (' + areas.length + ' ruimtes)', 'green');
-    } catch (e) {
+    }} catch (e) {{
       console.error(e);
       setStatus('Verbinding mislukt', 'red');
-    }
-  }
+    }}
+  }}
 
-  function toggleAreaPicker() {
+  function toggleAreaPicker() {{
     const on = document.getElementById('optSelectAreas').checked;
     const box = document.getElementById('areasBox');
     if (on) box.classList.remove('hidden'); else box.classList.add('hidden');
-  }
+  }}
 
-  function renderAreas() {
+  function renderAreas() {{
     const box = document.getElementById('areasList');
     box.innerHTML = '';
-    areas.forEach(a => {
+    areas.forEach(a => {{
       const aid = a.area_id;
       const div = document.createElement('div');
       div.className = 'p-3 border-2 rounded-lg cursor-pointer hover:bg-indigo-50 hover:border-indigo-300 transition-all';
@@ -976,60 +957,60 @@ def index():
 
       div.innerHTML = '<div class="font-semibold text-sm">' + escapeHtml(a.name) + '</div>' +
                       '<div class="text-xs text-gray-500 font-mono">' + escapeHtml(aid) + '</div>';
-      div.onclick = () => {
+      div.onclick = () => {{
         const i = selectedAreas.indexOf(aid);
         if (i > -1) selectedAreas.splice(i, 1);
         else selectedAreas.push(aid);
         renderAreas();
-      };
+      }};
       box.appendChild(div);
-    });
-  }
+    }});
+  }}
 
-  function selectAllAreas() {
+  function selectAllAreas() {{
     selectedAreas = areas.map(a => a.area_id);
     renderAreas();
-  }
+  }}
 
-  function clearAllAreas() {
+  function clearAllAreas() {{
     selectedAreas = [];
     renderAreas();
-  }
+  }}
 
-  function currentPayload() {
+  function currentPayload() {{
     const base_title = document.getElementById('dashName').value.trim();
     const include_overview = document.getElementById('optOverview').checked;
     const include_overig = document.getElementById('optOverig').checked;
     const include_floor_tabs = document.getElementById('optFloorTabs').checked;
     const select_areas = document.getElementById('optSelectAreas').checked;
     const area_ids = select_areas ? selectedAreas : null;
-    return { base_title, include_overview, include_overig, include_floor_tabs, area_ids };
-  }
+    return {{ base_title, include_overview, include_overig, include_floor_tabs, area_ids }};
+  }}
 
-  async function previewDashboards() {
+  async function previewDashboards() {{
     const p = currentPayload();
     if (!p.base_title) return alert('❌ Vul een basisnaam in!');
-    const res = await fetch(API_BASE + '/api/preview_dashboards', {
+    const res = await fetch(API_BASE + '/api/preview_dashboards', {{
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify(p)
-    });
+    }});
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
 
     document.getElementById('previewSimple').textContent = data.simple_code || '—';
     document.getElementById('previewAdvanced').textContent = data.advanced_code || '—';
-    document.getElementById('configSnippet').textContent = data.config_snippets || '# Snippets verschijnen na opslaan.';
-  }
+    document.getElementById('configSnippet').textContent = data.config_snippets || '# Snippets verschijnen na preview/opslaan.';
+  }}
 
-  async function saveDashboards() {
+  async function saveDashboards() {{
     const p = currentPayload();
     if (!p.base_title) return alert('❌ Vul een basisnaam in!');
-    const res = await fetch(API_BASE + '/api/create_dashboards', {
+    const res = await fetch(API_BASE + '/api/create_dashboards', {{
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
+      headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify(p)
-    });
+    }});
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
 
@@ -1038,34 +1019,34 @@ def index():
     document.getElementById('configSnippet').textContent = data.config_snippets || '—';
 
     alert('✅ Opgeslagen:\\n- ' + data.simple_filename + '\\n- ' + data.advanced_filename +
-          '\\n\\nPlak nu de snippets in configuration.yaml en herstart HA.');
-  }
+          '\\n\\nPlak nu de snippets in configuration.yaml en herstart Home Assistant.');
+  }}
 
-  async function reloadLovelace() {
-    const res = await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' });
+  async function reloadLovelace() {{
+    const res = await fetch(API_BASE + '/api/reload_lovelace', {{ method: 'POST' }});
     const data = await res.json();
-    if (!res.ok || !data.ok) {
+    if (!res.ok || !data.ok) {{
       return alert('❌ Reload failed: ' + (data.error || 'Onbekend') + (data.details ? ('\\n\\n' + JSON.stringify(data.details)) : ''));
-    }
+    }}
     alert('✅ Lovelace reload: ' + (data.result || 'OK'));
-  }
+  }}
 
-  async function loadDashboards() {
+  async function loadDashboards() {{
     const response = await fetch(API_BASE + '/api/dashboards');
     const items = await response.json();
 
     const list = document.getElementById('dashboardsList');
     const content = document.getElementById('dashboardsContent');
 
-    if (!items.length) {
+    if (!items.length) {{
       list.classList.add('hidden');
       return alert('Nog geen dashboards opgeslagen!');
-    }
+    }}
 
     list.classList.remove('hidden');
 
     let html = '';
-    items.forEach(t => {
+    items.forEach(t => {{
       html += '<div class="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
       html += '<div><div class="font-semibold">' + escapeHtml(t.name) + '</div>';
       html += '<div class="text-sm text-gray-500 font-mono">' + escapeHtml(t.filename) + '</div></div>';
@@ -1074,64 +1055,66 @@ def index():
       html += '<button onclick="downloadDashboard(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
       html += '<button onclick="deleteDashboard(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
       html += '</div></div>';
-    });
+    }});
 
     content.innerHTML = html;
-    list.scrollIntoView({ behavior: 'smooth' });
-  }
+    list.scrollIntoView({{ behavior: 'smooth' }});
+  }}
 
-  async function openDashboard(filename) {
+  async function openDashboard(filename) {{
     const res = await fetch(API_BASE + '/api/dashboard?filename=' + encodeURIComponent(filename));
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Kon dashboard niet openen'));
 
-    // show in "Simpel" box for convenience
     document.getElementById('previewSimple').textContent = data.code || '—';
     document.getElementById('previewAdvanced').textContent = '# Opened dashboard staat links.';
     document.getElementById('configSnippet').textContent = data.config_snippet || '—';
-  }
+  }}
 
-  async function deleteDashboard(filename) {
+  async function deleteDashboard(filename) {{
     if (!confirm('Weet je zeker dat je ' + filename + ' wilt verwijderen?')) return;
-    const response = await fetch(API_BASE + '/api/delete_dashboard', {
+    const response = await fetch(API_BASE + '/api/delete_dashboard', {{
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename })
-    });
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ filename }})
+    }});
     const result = await response.json();
-    if (response.ok) {
+    if (response.ok) {{
       alert('✅ Dashboard verwijderd!');
       loadDashboards();
-    } else {
+    }} else {{
       alert('❌ Fout: ' + (result.error || 'Onbekende fout'));
-    }
-  }
+    }}
+  }}
 
-  async function downloadDashboard(filename) {
+  async function downloadDashboard(filename) {{
     window.open(API_BASE + '/api/download?filename=' + encodeURIComponent(filename), '_blank');
-  }
+  }}
 
-  function copyYaml(elId) {
+  function copyYaml(elId) {{
     const text = document.getElementById(elId).textContent || '';
     navigator.clipboard.writeText(text).then(() => alert('📋 YAML gekopieerd!'));
-  }
+  }}
 
-  function copyConfigSnippet() {
+  function copyConfigSnippet() {{
     const text = document.getElementById('configSnippet').textContent || '';
     if (!text || text.startsWith('#')) return alert('Maak eerst een preview of sla op.');
     navigator.clipboard.writeText(text).then(() => alert('📋 Snippets gekopieerd!'));
-  }
+  }}
 
-  async function openDebug() {
+  async function openDebug() {{
     const res = await fetch(API_BASE + '/api/debug/ha');
     const data = await res.json();
     alert(JSON.stringify(data, null, 2));
-  }
+  }}
 
   init();
 </script>
 </body>
-</html>"""
+</html>
+"""
+    # fill only the two placeholders; all JS braces are already doubled where needed
+    html = html.format(APP_NAME=APP_NAME, APP_VERSION=APP_VERSION)
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 # -------------------------

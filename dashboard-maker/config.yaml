@@ -1,5 +1,5 @@
 name: "Dashboard Maker"
-version: "1.0.10"
+version: "1.0.11"
 slug: "dashboard_maker"
 description: "0-kennis wizard die automatisch WOW dashboards maakt (Mushroom + theme + demo)"
 arch:
@@ -11,11 +11,11 @@ arch:
 init: false
 
 ports:
-  8099/tcp: 8099
+  5001/tcp: 5001
 ports_description:
-  8099/tcp: "Web interface"
+  5001/tcp: "Web interface"
 
-webui: "http://[HOST]:[PORT:8099]"
+webui: "http://[HOST]:[PORT:5001]"
 startup: application
 boot: auto
 
@@ -25,7 +25,7 @@ homeassistant_api: true
 auth_api: true
 
 ingress: true
-ingress_port: 8099
+ingress_port: 5001
 
 panel_icon: mdi:view-dashboard-variant
 panel_title: Dashboard Maker

@@ -13,38 +13,48 @@ import zipfile
 import io
 import json
 
-APP_VERSION = "2.4.0-brute-connect-fix+direct8123+auto-fallback"
+APP_VERSION = "2.4.0-fixed-no-globals-homeassistant8123"
 APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
 
-# --------------------------------------------------------------------------------------
+# -------------------------
 # Paths
-# --------------------------------------------------------------------------------------
+# -------------------------
 HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 DASHBOARDS_PATH = os.environ.get("DASHBOARDS_PATH") or os.path.join(HA_CONFIG_PATH, "dashboards")
 
-THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
-THEME_NAME = "Dashboard Maker"
-DASHBOARD_THEME_FILE = os.path.join(THEMES_PATH, "dashboard_maker.yaml")
-
 ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
 
-# --------------------------------------------------------------------------------------
-# Mushroom install (no HACS needed)
-# --------------------------------------------------------------------------------------
+# --- Mushroom install (no HACS needed) ---
 MUSHROOM_VERSION = "3.3.0"
 MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/releases/download/v{MUSHROOM_VERSION}/mushroom.zip"
 WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
 MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "mushroom")
 
+# --- Themes ---
+THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
+DASHBOARD_THEME_FILE = os.path.join(THEMES_PATH, "dashboard_maker.yaml")
+THEME_NAME = "Dashboard Maker"
+
+# --- HA URLs ---
+HA_SUPERVISOR_URL = os.environ.get("HA_SUPERVISOR_URL", "http://supervisor/core")
+HA_DIRECT_URL = os.environ.get("HA_BASE_URL", "http://homeassistant:8123")
+
 Path(DASHBOARDS_PATH).mkdir(parents=True, exist_ok=True)
 Path(THEMES_PATH).mkdir(parents=True, exist_ok=True)
 Path(WWW_COMMUNITY).mkdir(parents=True, exist_ok=True)
 
-# --------------------------------------------------------------------------------------
-# Options.json (Add-on config)
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Utils
+# -------------------------
+def _read_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return (f.read() or "").strip()
+    except Exception:
+        return ""
+
 def _read_options_json() -> Dict[str, Any]:
     try:
         if os.path.exists(ADDON_OPTIONS_PATH):
@@ -54,87 +64,16 @@ def _read_options_json() -> Dict[str, Any]:
         pass
     return {}
 
-def _read_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return (f.read() or "").strip()
-    except Exception:
-        return ""
-
-# --------------------------------------------------------------------------------------
-# Token discovery (FIXED)
-# - We accept:
-#   - options.json access_token (preferred for DIRECT http://homeassistant:8123)
-#   - options.json supervisor_token (if user mistakenly pasted LLAT here, we still treat as access token)
-#   - env HOMEASSISTANT_TOKEN
-#   - env SUPERVISOR_TOKEN / supervisor token files (for SUPERVISOR proxy http://supervisor/core)
-# --------------------------------------------------------------------------------------
-def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
-    """
-    Returns (user_token, supervisor_token, options)
-
-    user_token (LLAT):
-      1) options.json: access_token
-      2) options.json: supervisor_token  (compat: people paste LLAT here)
-      3) env HOMEASSISTANT_TOKEN
-
-    supervisor_token:
-      1) env SUPERVISOR_TOKEN (real supervisor token in add-on env on HAOS)
-      2) token files (HAOS)
-      3) options.json: supervisor_token (only as LAST resort; may be LLAT)
-    """
-    opts = _read_options_json()
-
-    user_tok = (opts.get("access_token", "") or "").strip()
-    if not user_tok:
-        # compat: user pasted LLAT in supervisor_token option
-        user_tok = (opts.get("supervisor_token", "") or "").strip()
-    if not user_tok:
-        user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
-
-    sup_tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
-    if not sup_tok:
-        for p in ("/var/run/supervisor_token", "/run/supervisor_token"):
-            sup_tok = _read_file(p)
-            if sup_tok:
-                break
-    if not sup_tok:
-        # last resort (can be wrong, but we try)
-        sup_tok = (opts.get("supervisor_token", "") or "").strip()
-
-    return (user_tok or None, sup_tok or None, opts)
-
-USER_TOKEN, SUPERVISOR_TOKEN, OPTIONS = discover_tokens()
-
-# --------------------------------------------------------------------------------------
-# Connection endpoints
-# --------------------------------------------------------------------------------------
-HA_SUPERVISOR_URL = os.environ.get("HA_SUPERVISOR_URL", "http://supervisor/core")
-HA_DIRECT_URL = os.environ.get("HA_BASE_URL", "http://homeassistant:8123")
-
-# Active connection cache (auto-detected)
-ACTIVE_BASE_URL: Optional[str] = None
-ACTIVE_TOKEN: Optional[str] = None
-ACTIVE_MODE: str = "unknown"  # "direct" | "supervisor" | "none"
-
-print(f"== {APP_NAME} {APP_VERSION} ==")
-print(f"Config path: {HA_CONFIG_PATH}")
-print(f"Dashboards path: {DASHBOARDS_PATH}")
-print(f"Options.json: {ADDON_OPTIONS_PATH} (exists={os.path.exists(ADDON_OPTIONS_PATH)})")
-print(f"User token (LLAT) available: {bool(USER_TOKEN)}")
-print(f"Supervisor token available: {bool(SUPERVISOR_TOKEN)}")
-print(f"HA direct url: {HA_DIRECT_URL}")
-print(f"HA supervisor url: {HA_SUPERVISOR_URL}")
-print(f"Mushroom path: {MUSHROOM_PATH}")
-
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
 def sanitize_filename(name: str) -> str:
     name = (name or "").strip().lower()
     name = re.sub(r"[^\w\s-]", "", name)
     name = re.sub(r"[-\s]+", "_", name)
-    return (name or "unnamed")[:80]
+    if not name:
+        name = "unnamed"
+    return name[:80]
+
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 def safe_yaml_dump(obj: Any) -> str:
     class Dumper(yaml.SafeDumper):
@@ -185,138 +124,202 @@ def next_available_filename(base_dir: str, desired: str) -> str:
             return cand
     return f"{stem}_{int(datetime.now().timestamp())}.yaml"
 
-def norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
-
-# --------------------------------------------------------------------------------------
-# HA HTTP (AUTO CONNECT + FALLBACK)
-# --------------------------------------------------------------------------------------
-def _headers_for(token: Optional[str]) -> Dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
-
-def _request_raw(base_url: str, token: Optional[str], method: str, path: str, json_body: dict | None, timeout: int) -> requests.Response:
-    if not path.startswith("/"):
-        path = "/" + path
-    url = f"{base_url}{path}"
-    return requests.request(method, url, headers=_headers_for(token), json=json_body, timeout=timeout)
-
-def ha_probe() -> Tuple[bool, str]:
+# -------------------------
+# Token discovery
+# -------------------------
+def discover_tokens() -> Tuple[Optional[str], Optional[str]]:
     """
-    Detects best working connection:
-      1) Supervisor proxy + supervisor token (http://supervisor/core)
-      2) Direct core + user token (http://homeassistant:8123)
-      3) Direct core + supervisor token (sometimes works, usually not)
+    Returns (user_token, supervisor_token)
+
+    user_token = Long-Lived Access Token (LLAT) for direct Core API.
+    supervisor_token = Supervisor token for supervisor proxy (rarely manually needed).
     """
-    global ACTIVE_BASE_URL, ACTIVE_TOKEN, ACTIVE_MODE
+    opts = _read_options_json()
 
-    # If already detected, keep it (unless it's invalid later)
-    if ACTIVE_BASE_URL and ACTIVE_TOKEN and ACTIVE_MODE in ("direct", "supervisor"):
-        return True, f"cached:{ACTIVE_MODE}"
+    user_tok = (opts.get("access_token", "") or "").strip()
+    if not user_tok:
+        user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
 
-    candidates: List[Tuple[str, Optional[str], str]] = []
-    if SUPERVISOR_TOKEN:
-        candidates.append((HA_SUPERVISOR_URL, SUPERVISOR_TOKEN, "supervisor"))
-    if USER_TOKEN:
-        candidates.append((HA_DIRECT_URL, USER_TOKEN, "direct"))
-    if SUPERVISOR_TOKEN:
-        candidates.append((HA_DIRECT_URL, SUPERVISOR_TOKEN, "direct_sup_token"))
+    sup_tok = (opts.get("supervisor_token", "") or "").strip()
+    if not sup_tok:
+        sup_tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
+    if not sup_tok:
+        for p in ("/var/run/supervisor_token", "/run/supervisor_token"):
+            sup_tok = _read_file(p)
+            if sup_tok:
+                break
 
-    last_err = "No candidates"
-    for base, tok, mode in candidates:
-        try:
-            r = _request_raw(base, tok, "GET", "/api/", None, 8)
-            if r.status_code == 200:
-                ACTIVE_BASE_URL = base
-                ACTIVE_TOKEN = tok
-                ACTIVE_MODE = "supervisor" if mode == "supervisor" else "direct"
-                return True, f"ok:{mode}"
-            if r.status_code in (401, 403):
-                last_err = f"{mode} unauthorized ({r.status_code})"
-                continue
-            # other status: still treat as connected-ish
-            ACTIVE_BASE_URL = base
-            ACTIVE_TOKEN = tok
-            ACTIVE_MODE = "supervisor" if mode == "supervisor" else "direct"
-            return True, f"weird:{mode}:{r.status_code}"
-        except Exception as e:
-            last_err = f"{mode} error: {str(e)[:120]}"
-            continue
+    return (user_tok or None, sup_tok or None)
 
-    ACTIVE_BASE_URL = None
-    ACTIVE_TOKEN = None
-    ACTIVE_MODE = "none"
-    return False, last_err
+USER_TOKEN, SUPERVISOR_TOKEN = discover_tokens()
 
-def ha_request(method: str, path: str, json_body: dict | None = None, timeout: int = 15) -> requests.Response:
-    """
-    Uses detected best base+token.
-    If 401 occurs, re-probe and retry once.
-    """
-    ok, _ = ha_probe()
-    if not ok or not ACTIVE_BASE_URL:
-        raise requests.exceptions.ConnectionError("No working Home Assistant connection. Configure access_token (LLAT) or run as HAOS add-on with supervisor token.")
+print(f"== {APP_NAME} {APP_VERSION} ==")
+print(f"Config path: {HA_CONFIG_PATH}")
+print(f"Dashboards path: {DASHBOARDS_PATH}")
+print(f"Options.json: {ADDON_OPTIONS_PATH} (exists={os.path.exists(ADDON_OPTIONS_PATH)})")
+print(f"User token (LLAT) available: {bool(USER_TOKEN)}")
+print(f"Supervisor token available: {bool(SUPERVISOR_TOKEN)}")
+print(f"HA direct url: {HA_DIRECT_URL}")
+print(f"HA supervisor url: {HA_SUPERVISOR_URL}")
+print(f"Mushroom path: {MUSHROOM_PATH}")
 
-    r = _request_raw(ACTIVE_BASE_URL, ACTIVE_TOKEN, method, path, json_body, timeout)
-    if r.status_code in (401, 403):
-        # Re-probe: user might have changed token
-        global ACTIVE_BASE_URL, ACTIVE_TOKEN, ACTIVE_MODE
-        ACTIVE_BASE_URL = None
-        ACTIVE_TOKEN = None
-        ACTIVE_MODE = "unknown"
-        ok2, _ = ha_probe()
-        if ok2 and ACTIVE_BASE_URL:
-            r = _request_raw(ACTIVE_BASE_URL, ACTIVE_TOKEN, method, path, json_body, timeout)
-    return r
+# -------------------------
+# Connection state (NO GLOBALS)
+# -------------------------
+class HAConnection:
+    def __init__(self):
+        self.active_base_url: Optional[str] = None
+        self.active_token: Optional[str] = None
+        self.active_mode: str = "unknown"  # "direct" or "supervisor"
+        self.last_probe: Optional[str] = None
+
+    def _headers(self, token: Optional[str], use_supervisor: bool) -> Dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+            if use_supervisor:
+                # harmless if ignored; helps some proxy stacks
+                h["X-Supervisor-Token"] = token
+        return h
+
+    def _request_raw(
+        self,
+        base_url: str,
+        token: Optional[str],
+        use_supervisor: bool,
+        method: str,
+        path: str,
+        json_body: dict | None,
+        timeout: int,
+    ) -> requests.Response:
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{base_url}{path}"
+        return requests.request(method, url, headers=self._headers(token, use_supervisor), json=json_body, timeout=timeout)
+
+    def probe(self, force: bool = False) -> Tuple[bool, str]:
+        """
+        Decide best working connection and cache it.
+        Order:
+          1) If USER_TOKEN exists: try direct
+          2) If SUPERVISOR_TOKEN exists: try supervisor proxy
+          3) Fallback: try the other if available
+        """
+        if self.active_base_url and self.active_token and not force:
+            return True, f"cached:{self.active_mode}"
+
+        # refresh tokens each probe (options can change without restart sometimes)
+        global USER_TOKEN, SUPERVISOR_TOKEN
+        USER_TOKEN, SUPERVISOR_TOKEN = discover_tokens()
+
+        attempts: List[Tuple[str, str, Optional[str], bool]] = []
+
+        if USER_TOKEN:
+            attempts.append(("direct", HA_DIRECT_URL, USER_TOKEN, False))
+        if SUPERVISOR_TOKEN:
+            attempts.append(("supervisor", HA_SUPERVISOR_URL, SUPERVISOR_TOKEN, True))
+
+        # fallback attempts (reverse)
+        if USER_TOKEN and SUPERVISOR_TOKEN:
+            # already both in list; no extra needed
+            pass
+
+        if not attempts:
+            self.active_base_url = None
+            self.active_token = None
+            self.active_mode = "unknown"
+            self.last_probe = "no_token"
+            return False, "Geen token. Voeg 'access_token' toe (LLAT) in add-on opties."
+
+        last_err = ""
+        for mode, base, tok, use_sup in attempts:
+            try:
+                r = self._request_raw(base, tok, use_sup, "GET", "/api/", None, 8)
+                if r.status_code == 200:
+                    self.active_base_url = base
+                    self.active_token = tok
+                    self.active_mode = mode
+                    self.last_probe = "ok"
+                    return True, f"OK via {mode} ({base})"
+                if r.status_code in (401, 403):
+                    last_err = f"{mode}: unauthorized ({r.status_code})"
+                else:
+                    last_err = f"{mode}: http {r.status_code}: {r.text[:120]}"
+            except requests.exceptions.RequestException as e:
+                last_err = f"{mode}: connection error: {str(e)[:120]}"
+
+        self.active_base_url = None
+        self.active_token = None
+        self.active_mode = "unknown"
+        self.last_probe = last_err or "probe_failed"
+        return False, last_err or "Probe failed"
+
+    def request(self, method: str, path: str, json_body: dict | None = None, timeout: int = 15) -> requests.Response:
+        ok, _ = self.probe(force=False)
+        if not ok or not self.active_base_url:
+            # force re-probe once
+            ok2, msg2 = self.probe(force=True)
+            if not ok2 or not self.active_base_url:
+                raise requests.exceptions.ConnectionError(msg2)
+
+        use_sup = (self.active_mode == "supervisor")
+        r = self._request_raw(self.active_base_url, self.active_token, use_sup, method, path, json_body, timeout)
+
+        # if token expired/incorrect, retry once after reprobe
+        if r.status_code in (401, 403):
+            self.active_base_url = None
+            self.active_token = None
+            self.active_mode = "unknown"
+            ok3, _ = self.probe(force=True)
+            if ok3 and self.active_base_url:
+                use_sup = (self.active_mode == "supervisor")
+                r = self._request_raw(self.active_base_url, self.active_token, use_sup, method, path, json_body, timeout)
+
+        return r
+
+conn = HAConnection()
 
 def ha_call_service(domain: str, service: str, data: dict | None = None) -> Tuple[Dict[str, Any], int]:
     try:
-        r = ha_request("POST", f"/api/services/{domain}/{service}", json_body=(data or {}), timeout=15)
-        if r.status_code not in (200, 201):
-            return {"ok": False, "error": f"Service call failed: HTTP {r.status_code}", "details": r.text[:2000]}, 400
+        resp = conn.request("POST", f"/api/services/{domain}/{service}", json_body=(data or {}), timeout=15)
+        if resp.status_code not in (200, 201):
+            return {"ok": False, "error": f"{domain}.{service} failed: {resp.status_code}", "details": resp.text[:2000]}, 400
         try:
-            return {"ok": True, "result": r.json()}, 200
+            return {"ok": True, "result": resp.json()}, 200
         except Exception:
-            return {"ok": True, "result": r.text}, 200
+            return {"ok": True, "result": resp.text}, 200
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-# --------------------------------------------------------------------------------------
-# Entities / Registries
-# --------------------------------------------------------------------------------------
+# -------------------------
+# HA data helpers
+# -------------------------
 def get_states() -> List[Dict[str, Any]]:
     try:
-        r = ha_request("GET", "/api/states", timeout=15)
+        r = conn.request("GET", "/api/states", timeout=12)
         if r.status_code != 200:
             return []
         return r.json()
     except Exception:
-        # demo fallback if no connection
-        return [
-            {"entity_id": "light.woonkamer", "state": "off", "attributes": {"friendly_name": "Woonkamer Lamp"}},
-            {"entity_id": "sensor.temp_woonkamer", "state": "21.1", "attributes": {"friendly_name": "Temperatuur", "unit_of_measurement": "°C", "device_class": "temperature"}},
-            {"entity_id": "media_player.tv", "state": "off", "attributes": {"friendly_name": "TV"}},
-        ]
+        return []
 
 def get_area_registry() -> List[Dict[str, Any]]:
     try:
-        r = ha_request("GET", "/api/config/area_registry", timeout=15)
+        r = conn.request("GET", "/api/config/area_registry", timeout=12)
         if r.status_code != 200:
             return []
         return r.json()
     except Exception:
-        return [{"area_id": "woonkamer", "name": "Woonkamer (Beneden)"}, {"area_id": "slaapkamer", "name": "Slaapkamer (Boven)"}]
+        return []
 
 def get_entity_registry() -> List[Dict[str, Any]]:
     try:
-        r = ha_request("GET", "/api/config/entity_registry", timeout=15)
+        r = conn.request("GET", "/api/config/entity_registry", timeout=12)
         if r.status_code != 200:
             return []
         return r.json()
     except Exception:
-        return [{"entity_id": "light.woonkamer", "area_id": "woonkamer"}, {"entity_id": "sensor.temp_woonkamer", "area_id": "woonkamer"}]
+        return []
 
 def build_entities_enriched() -> List[Dict[str, Any]]:
     states = get_states()
@@ -347,12 +350,13 @@ def build_entities_enriched() -> List[Dict[str, Any]]:
         })
     return out
 
-# --------------------------------------------------------------------------------------
-# Smart filters
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Smart filters (anti-clutter)
+# -------------------------
 DEFAULT_IGNORE_ENTITY_ID_SUFFIXES = [
     "_rssi", "_linkquality", "_lqi", "_signal_strength", "_signal", "_snr",
-    "_last_seen", "_lastseen", "_lastupdate", "_uptime", "_available", "_availability",
+    "_last_seen", "_lastseen", "_lastupdate",
+    "_uptime", "_available", "_availability",
     "_battery", "_battery_level",
 ]
 DEFAULT_IGNORE_ENTITY_ID_CONTAINS = [
@@ -402,9 +406,9 @@ def smart_filter_entities(entities: List[Dict[str, Any]], advanced: bool) -> Lis
         out = non + sensors_sorted
     return sorted(out, key=lambda x: norm(x.get("name") or x["entity_id"]))
 
-# --------------------------------------------------------------------------------------
+# -------------------------
 # Floor detection
-# --------------------------------------------------------------------------------------
+# -------------------------
 FLOOR_KEYWORDS = {
     "beneden": ["beneden", "begane grond", "bg", "downstairs", "ground floor", "vloer 0", "0e verdieping"],
     "boven": ["boven", "1e verdieping", "eerste verdieping", "2e verdieping", "upstairs", "floor 1", "floor 2"],
@@ -416,14 +420,14 @@ def guess_floor_for_area(area_name: str) -> Optional[str]:
             return floor
     return None
 
-# --------------------------------------------------------------------------------------
+# -------------------------
 # Mushroom install + resource
-# --------------------------------------------------------------------------------------
+# -------------------------
 def mushroom_installed() -> bool:
     return os.path.exists(os.path.join(MUSHROOM_PATH, "mushroom.js"))
 
 def download_and_extract_zip(url: str, target_dir: str):
-    r = requests.get(url, timeout=60)
+    r = requests.get(url, timeout=45)
     r.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         z.extractall(target_dir)
@@ -431,19 +435,19 @@ def download_and_extract_zip(url: str, target_dir: str):
 def install_mushroom() -> str:
     os.makedirs(WWW_COMMUNITY, exist_ok=True)
     if mushroom_installed():
-        return "Mushroom kaarten: al geïnstalleerd"
+        return "Mushroom kaarten zijn al geïnstalleerd"
     download_and_extract_zip(MUSHROOM_GITHUB_ZIP, WWW_COMMUNITY)
     if not mushroom_installed():
-        raise RuntimeError("Mushroom install faalde (mushroom.js niet gevonden).")
-    return "Mushroom kaarten: geïnstalleerd"
+        raise RuntimeError("Mushroom install faalde: mushroom.js niet gevonden.")
+    return "Mushroom kaarten geïnstalleerd"
 
 def get_lovelace_resources() -> List[Dict[str, Any]]:
     try:
-        r = ha_request("GET", "/api/lovelace/resources", timeout=15)
+        r = conn.request("GET", "/api/lovelace/resources", timeout=12)
         if r.status_code != 200:
             return []
-        j = r.json()
-        return j if isinstance(j, list) else []
+        data = r.json()
+        return data if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -451,29 +455,30 @@ def ensure_mushroom_resource() -> str:
     desired_url = "/local/community/mushroom/mushroom.js"
     resources = get_lovelace_resources()
     if any((x.get("url") == desired_url) for x in resources):
-        return "Lovelace resource: al gekoppeld"
-
+        return "Mushroom resource staat goed"
     payload = {"type": "module", "url": desired_url}
     try:
-        r = ha_request("POST", "/api/lovelace/resources", json_body=payload, timeout=15)
+        r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
         if r.status_code in (200, 201):
-            return "Lovelace resource: gekoppeld"
-        # If HA returns 400 because it already exists, still ok for users
-        return "Lovelace resource: gekoppeld (best effort)"
+            return "Mushroom resource toegevoegd"
+        # best effort: HA kan 400 geven als al bestaat
+        return "Mushroom resource (best effort) OK"
     except Exception:
-        return "Lovelace resource: gekoppeld (best effort)"
+        return "Mushroom resource (best effort) OK"
 
-# --------------------------------------------------------------------------------------
-# Theme (auto light/dark)
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Theme generator (auto light/dark)
+# -------------------------
 THEME_PRESETS = {
     "indigo_luxe": {"label": "Indigo Luxe", "primary": "#6366f1", "accent": "#8b5cf6"},
     "emerald_fresh": {"label": "Emerald Fresh", "primary": "#10b981", "accent": "#34d399"},
     "amber_warm": {"label": "Amber Warm", "primary": "#f59e0b", "accent": "#f97316"},
     "rose_neon": {"label": "Rose Neon", "primary": "#f43f5e", "accent": "#fb7185"},
 }
+
 def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
-    density = density if density in ("comfy", "compact") else "comfy"
+    if density not in ("comfy", "compact"):
+        density = "comfy"
     radius = "18px" if density == "comfy" else "14px"
     shadow = "0 18px 40px rgba(0,0,0,0.14)" if density == "comfy" else "0 12px 26px rgba(0,0,0,0.14)"
     card_pad = "14px" if density == "comfy" else "10px"
@@ -489,6 +494,7 @@ def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
   ha-card-border-radius: "{radius}"
   ha-card-box-shadow: "{shadow}"
   ha-card-background: "rgba(255,255,255,0.92)"
+
   card-mod-theme: "{THEME_NAME}"
   card-mod-card: |
     ha-card {{
@@ -529,22 +535,24 @@ def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
 
 def install_dashboard_theme(preset_key: str, density: str) -> str:
     preset = THEME_PRESETS.get(preset_key) or THEME_PRESETS["indigo_luxe"]
-    write_text_file(DASHBOARD_THEME_FILE, build_theme_yaml(preset["primary"], preset["accent"], density=density))
-    return f"Theme: geïnstalleerd ({preset['label']})"
+    theme_yaml = build_theme_yaml(primary=preset["primary"], accent=preset["accent"], density=density)
+    write_text_file(DASHBOARD_THEME_FILE, theme_yaml)
+    return f"Theme geschreven: {preset['label']}"
 
-def ha_try_set_theme(theme_name: str) -> Tuple[bool, str]:
-    # Try with mode auto, then without (compat)
-    r, st = ha_call_service("frontend", "set_theme", {"name": theme_name, "mode": "auto"})
+def try_set_theme_auto() -> str:
+    # Try modern (mode)
+    r, st = ha_call_service("frontend", "set_theme", {"name": THEME_NAME, "mode": "auto"})
     if st == 200 and r.get("ok"):
-        return True, "frontend.set_theme(mode=auto)"
-    r2, st2 = ha_call_service("frontend", "set_theme", {"name": theme_name})
+        return "Theme actief (auto licht/donker)"
+    # Fallback
+    r2, st2 = ha_call_service("frontend", "set_theme", {"name": THEME_NAME})
     if st2 == 200 and r2.get("ok"):
-        return True, "frontend.set_theme(fallback)"
-    return False, (r.get("error") or r2.get("error") or "set_theme failed")
+        return "Theme actief (fallback)"
+    return "Theme geïnstalleerd (activeren niet gelukt, maar vaak wel beschikbaar)"
 
-# --------------------------------------------------------------------------------------
-# Mushroom cards helpers (dashboard generator)
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Mushroom card helpers
+# -------------------------
 def _m_title(title: str, subtitle: str = "") -> Dict[str, Any]:
     c = {"type": "custom:mushroom-title-card", "title": title}
     if subtitle:
@@ -620,9 +628,9 @@ def card_for_entity(e: Dict[str, Any], advanced: bool) -> Optional[Dict[str, Any
         return {"type": "custom:mushroom-entity-card", "entity": eid, "tap_action": {"action": "more-info"}}
     return None
 
-# --------------------------------------------------------------------------------------
-# Views / Actions / Dashboard build
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Grouping / views
+# -------------------------
 def group_entities_by_area(entities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for e in entities:
@@ -678,10 +686,10 @@ def build_top_actions_cards(all_entities: List[Dict[str, Any]], areas: List[Dict
 
 def build_overview_view(all_entities: List[Dict[str, Any]], areas: List[Dict[str, Any]], grouped: Dict[str, List[Dict[str, Any]]], advanced: bool, density: str) -> Dict[str, Any]:
     columns = 2 if density == "comfy" else 3
-
-    chips: List[Dict[str, Any]] = []
-    chips.append(_chip_template("{{ states.light | selectattr('state','eq','on') | list | count }} aan", "mdi:lightbulb-group"))
-    chips.append(_chip_template("{{ now().strftime('%H:%M') }}", "mdi:clock-outline"))
+    chips: List[Dict[str, Any]] = [
+        _chip_template("{{ states.light | selectattr('state','eq','on') | list | count }} aan", "mdi:lightbulb-group"),
+        _chip_template("{{ now().strftime('%H:%M') }}", "mdi:clock-outline"),
+    ]
 
     for dom, icon in [("climate", "mdi:thermostat"), ("media_player", "mdi:play")]:
         for e in all_entities:
@@ -703,12 +711,15 @@ def build_overview_view(all_entities: List[Dict[str, Any]], areas: List[Dict[str
     if lights:
         cards.append(_m_title("Lampen"))
         cards.append(_grid([card_for_entity(e, advanced) for e in lights if card_for_entity(e, advanced)], columns_mobile=columns))
+
     if climates:
         cards.append(_m_title("Klimaat"))
         cards.append(_stack([card_for_entity(e, advanced) for e in climates if card_for_entity(e, advanced)]))
+
     if media and advanced:
         cards.append(_m_title("Media"))
         cards.append(_stack([card_for_entity(e, advanced) for e in media if card_for_entity(e, advanced)]))
+
     if covers:
         cards.append(_m_title("Rolluiken / Gordijnen"))
         cards.append(_grid([card_for_entity(e, advanced) for e in covers if card_for_entity(e, advanced)], columns_mobile=columns))
@@ -741,21 +752,27 @@ def build_area_view(area: Dict[str, Any], entities: List[Dict[str, Any]], advanc
     if lights:
         cards.append(_m_title("Lampen"))
         cards.append(_grid([card_for_entity(e, advanced) for e in lights if card_for_entity(e, advanced)], columns_mobile=columns))
+
     if switches and advanced:
         cards.append(_m_title("Schakelaars"))
         cards.append(_grid([card_for_entity(e, advanced) for e in switches if card_for_entity(e, advanced)], columns_mobile=columns))
+
     if climates:
         cards.append(_m_title("Klimaat"))
         cards.append(_stack([card_for_entity(e, advanced) for e in climates if card_for_entity(e, advanced)]))
+
     if covers and advanced:
         cards.append(_m_title("Covers"))
         cards.append(_grid([card_for_entity(e, advanced) for e in covers if card_for_entity(e, advanced)], columns_mobile=columns))
+
     if media and advanced:
         cards.append(_m_title("Media"))
         cards.append(_stack([card_for_entity(e, advanced) for e in media if card_for_entity(e, advanced)]))
+
     if binaries:
         cards.append(_m_title("Status"))
         cards.append(_grid([card_for_entity(e, advanced) for e in binaries if card_for_entity(e, advanced)], columns_mobile=columns))
+
     if sensors and advanced:
         cards.append(_m_title("Metingen"))
         cards.append(_grid([card_for_entity(e, advanced) for e in sensors if card_for_entity(e, advanced)], columns_mobile=columns))
@@ -843,9 +860,9 @@ def build_dashboard_yaml(
 
     return {"title": dashboard_title, "views": views}
 
-# --------------------------------------------------------------------------------------
-# Wizard UI (static HTML: no f-string, no braces problems)
-# --------------------------------------------------------------------------------------
+# -------------------------
+# Wizard UI
+# -------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="nl">
 <head>
@@ -869,9 +886,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span>Verbinden…</span>
           </div>
           <div class="flex gap-2 flex-wrap">
-            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-              🔄 Vernieuwen
-            </button>
             <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
               🧾 Debug
             </button>
@@ -880,25 +894,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
       </div>
 
       <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6">
-        <div class="flex items-center justify-between text-sm font-semibold">
-          <div id="step1Dot" class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-indigo-500 inline-block"></span> Stap 1</div>
-          <div class="flex-1 mx-3 h-1 bg-slate-200 rounded"></div>
-          <div id="step2Dot" class="flex items-center gap-2 text-slate-500"><span class="w-3 h-3 rounded-full bg-slate-300 inline-block"></span> Stap 2</div>
-          <div class="flex-1 mx-3 h-1 bg-slate-200 rounded"></div>
-          <div id="step3Dot" class="flex items-center gap-2 text-slate-500"><span class="w-3 h-3 rounded-full bg-slate-300 inline-block"></span> Stap 3</div>
-          <div class="flex-1 mx-3 h-1 bg-slate-200 rounded"></div>
-          <div id="step4Dot" class="flex items-center gap-2 text-slate-500"><span class="w-3 h-3 rounded-full bg-slate-300 inline-block"></span> Klaar</div>
+        <div class="text-sm text-slate-700">
+          <b>Tip:</b> Heb je een “Service Token / Long-Lived Access Token”? Zet die in add-on opties als <code>access_token</code>.
         </div>
       </div>
 
-      <div id="step1" class="border border-slate-200 rounded-2xl p-5">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h2 class="text-xl font-bold text-slate-900">Stap 1 — Super setup (automatisch)</h2>
-            <p class="text-slate-600 mt-1">We installeren mooie kaarten + zetten een premium stijl aan (auto licht/donker).</p>
-          </div>
-          <div class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">1 klik</div>
-        </div>
+      <div class="border border-slate-200 rounded-2xl p-5">
+        <h2 class="text-xl font-bold text-slate-900">Stap 1 — Super setup (automatisch)</h2>
+        <p class="text-slate-600 mt-1">Installeert Mushroom + theme (auto licht/donker).</p>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
           <div class="bg-white border border-slate-200 rounded-xl p-4">
@@ -909,30 +912,27 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <option value="amber_warm">Amber Warm</option>
               <option value="rose_neon">Rose Neon</option>
             </select>
-            <p class="text-xs text-slate-500 mt-2">Kies een vibe. Alles wordt meteen strak.</p>
           </div>
-
           <div class="bg-white border border-slate-200 rounded-xl p-4">
             <div class="font-semibold">Layout</div>
             <select id="density" class="mt-2 w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-indigo-500 focus:outline-none">
               <option value="comfy">Comfy (luchtig)</option>
               <option value="compact">Compact (minder scroll)</option>
             </select>
-            <p class="text-xs text-slate-500 mt-2">Compact = meer op 1 scherm (mobiel).</p>
           </div>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
           <div class="bg-white border border-slate-200 rounded-xl p-4">
             <div class="font-semibold">Verbinding</div>
-            <div id="chkEngine" class="text-sm mt-1 text-slate-500">⏳ controleren…</div>
+            <div id="chkConn" class="text-sm mt-1 text-slate-500">⏳ wachten…</div>
           </div>
           <div class="bg-white border border-slate-200 rounded-xl p-4">
-            <div class="font-semibold">Mooie kaarten</div>
+            <div class="font-semibold">Mushroom</div>
             <div id="chkCards" class="text-sm mt-1 text-slate-500">⏳ wachten…</div>
           </div>
           <div class="bg-white border border-slate-200 rounded-xl p-4">
-            <div class="font-semibold">Kleuren & stijl</div>
+            <div class="font-semibold">Theme</div>
             <div id="chkStyle" class="text-sm mt-1 text-slate-500">⏳ wachten…</div>
           </div>
         </div>
@@ -941,69 +941,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <button onclick="runSetup()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
             🚀 Alles automatisch instellen
           </button>
-          <div class="text-sm text-slate-500 flex items-center">
-            <span id="setupHint">Klik één keer. Wij doen de rest.</span>
-          </div>
-        </div>
-      </div>
-
-      <div id="step2" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h2 class="text-xl font-bold text-slate-900">Stap 2 — WOW demo</h2>
-            <p class="text-slate-600 mt-1">Maak een voorbeeld dashboard om direct te zien hoe ziek dit is.</p>
-          </div>
-          <div class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">1 klik</div>
-        </div>
-
-        <div class="mt-4 flex flex-col sm:flex-row gap-3">
           <button onclick="createDemo()" class="w-full sm:w-auto bg-slate-900 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-black shadow-lg">
-            ✨ Maak demo dashboard
+            ✨ Maak WOW demo dashboard
           </button>
-          <div class="text-sm text-slate-500 flex items-center">
-            <span>Je kunt dit later altijd verwijderen.</span>
-          </div>
-        </div>
-      </div>
-
-      <div id="step3" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h2 class="text-xl font-bold text-slate-900">Stap 3 — Maak jouw dashboards</h2>
-            <p class="text-slate-600 mt-1">Geef een naam. Wij maken automatisch 2 dashboards: <b>Simpel</b> & <b>Uitgebreid</b>.</p>
-          </div>
-          <div class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">Nieuw</div>
         </div>
 
-        <div class="mt-4">
-          <label class="block text-base font-semibold text-gray-700 mb-2">Naam</label>
-          <input type="text" id="dashName" placeholder="bijv. Thuis"
-                 class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
+        <div class="mt-5 border-t pt-5">
+          <h3 class="text-lg font-bold text-slate-900">Maak jouw dashboards</h3>
+          <p class="text-slate-600 mt-1">Wij maken automatisch 2 dashboards: <b>Simpel</b> & <b>Uitgebreid</b>.</p>
+
+          <div class="mt-3">
+            <label class="block text-base font-semibold text-gray-700 mb-2">Naam</label>
+            <input type="text" id="dashName" placeholder="bijv. Thuis"
+                   class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
+          </div>
 
           <div class="mt-3 flex flex-col sm:flex-row gap-3">
             <button onclick="createMine()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
               🎨 Maak mijn dashboards
             </button>
+            <button onclick="loadDashboards()" class="w-full sm:w-auto bg-white border border-gray-300 text-gray-800 py-3 px-4 rounded-xl text-lg font-semibold hover:bg-gray-100 shadow-lg">
+              📋 Toon dashboards
+            </button>
           </div>
         </div>
       </div>
-
-      <div id="step4" class="border border-slate-200 rounded-2xl p-5 mt-4 hidden">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <h2 class="text-xl font-bold text-slate-900">🎉 Klaar!</h2>
-            <p class="text-slate-600 mt-1">Je dashboards zijn opgeslagen. Toon ze hieronder.</p>
-          </div>
-          <div class="text-xs px-2 py-1 rounded bg-green-100 text-green-700">Gereed</div>
-        </div>
-
-        <div class="mt-4 flex flex-col sm:flex-row gap-3">
-          <button onclick="loadDashboards()" class="w-full sm:w-auto bg-slate-900 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-black shadow-lg">
-            📋 Toon mijn dashboards
-          </button>
-        </div>
-      </div>
-
     </div>
 
     <div id="dashboardsList" class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 hidden">
@@ -1013,70 +975,42 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
 <script>
-  const API_BASE = window.location.pathname.replace(/\/$/, '');
-
-  function setStatus(text, color = 'gray') {
+  function setStatus(text, color='gray') {
     document.getElementById('status').innerHTML =
       '<span class="inline-block w-3 h-3 bg-' + color + '-500 rounded-full mr-2"></span>' +
       '<span class="text-' + color + '-700">' + text + '</span>';
   }
-
-  function setDot(step, active) {
-    const el = document.getElementById(step + 'Dot');
-    const dot = el.querySelector('span');
-    if (active) {
-      el.classList.remove('text-slate-500');
-      dot.className = 'w-3 h-3 rounded-full bg-indigo-500 inline-block';
-    } else {
-      el.classList.add('text-slate-500');
-      dot.className = 'w-3 h-3 rounded-full bg-slate-300 inline-block';
-    }
-  }
-
-  function unlockStep(stepId) {
-    const el = document.getElementById(stepId);
-    el.classList.remove('opacity-50', 'pointer-events-none');
-  }
-
-  function showStep4() {
-    document.getElementById('step4').classList.remove('hidden');
-    setDot('step4', true);
-  }
-
-  function escapeHtml(str) {
-    return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
   function setCheck(id, ok, msg) {
     const el = document.getElementById(id);
     el.textContent = (ok ? '✅ ' : '❌ ') + msg;
     el.className = 'text-sm mt-1 ' + (ok ? 'text-green-700' : 'text-red-700');
   }
+  function escapeHtml(str) {
+    return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
 
   async function init() {
     setStatus('Verbinden…', 'yellow');
     try {
-      const cfgRes = await fetch(API_BASE + '/api/config');
-      const cfg = await cfgRes.json();
+      const r = await fetch('/api/config', {cache:'no-store'});
+      const cfg = await r.json();
 
-      if (cfg.ha_connected) {
+      if (cfg.ha_ok) {
         setStatus('Verbonden (' + cfg.ha_mode + ')', 'green');
-        setCheck('chkEngine', true, 'OK (' + cfg.ha_mode + ')');
+        setCheck('chkConn', true, 'OK via ' + cfg.ha_mode);
       } else {
-        setStatus('Geen HA verbinding', 'red');
-        setCheck('chkEngine', false, cfg.ha_error || 'Geen verbinding');
+        setStatus('Niet verbonden', 'red');
+        setCheck('chkConn', false, cfg.ha_error || 'Geen verbinding');
       }
 
-      setCheck('chkCards', true, cfg.mushroom_installed ? 'Al aanwezig' : 'Klaar om te installeren');
-      setCheck('chkStyle', true, cfg.theme_file_exists ? 'Al aanwezig' : 'Klaar om te installeren');
-
-      setDot('step1', true);
-    } catch (e) {
+      setCheck('chkCards', cfg.mushroom_installed, cfg.mushroom_installed ? 'Geïnstalleerd' : 'Niet geïnstalleerd');
+      setCheck('chkStyle', cfg.theme_file_exists, cfg.theme_file_exists ? 'Beschikbaar' : 'Niet geïnstalleerd');
+    } catch(e) {
       console.error(e);
       setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden');
-      setCheck('chkCards', false, 'Kan niet verbinden');
-      setCheck('chkStyle', false, 'Kan niet verbinden');
+      setCheck('chkConn', false, 'Fetch /api/config faalde');
+      setCheck('chkCards', false, 'Onbekend');
+      setCheck('chkStyle', false, 'Onbekend');
     }
   }
 
@@ -1084,54 +1018,36 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const preset = document.getElementById('preset').value;
     const density = document.getElementById('density').value;
 
-    document.getElementById('setupHint').textContent = 'Bezig… (Mushroom + stijl + auto licht/donker)';
-    setCheck('chkCards', true, 'Bezig…');
-    setCheck('chkStyle', true, 'Bezig…');
-
     try {
-      const res = await fetch(API_BASE + '/api/setup', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ preset, density })
+      const res = await fetch('/api/setup', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({preset, density})
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) return alert('❌ Setup mislukt: ' + (data.error || 'Onbekend'));
 
-      if (!res.ok || !data.ok) {
-        document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-        return alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
-      }
-
-      setCheck('chkCards', true, 'Klaar');
-      setCheck('chkStyle', true, 'Klaar');
-      document.getElementById('setupHint').textContent = 'Klaar! Je kunt verder.';
-
-      unlockStep('step2');
-      unlockStep('step3');
-      setDot('step2', true);
-      setDot('step3', true);
-
-      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
-    } catch (e) {
+      alert('✅ Setup klaar!\n\n' + (data.steps || []).join('\n'));
+      init();
+    } catch(e) {
       console.error(e);
-      document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-      alert('❌ Instellen mislukt.');
+      alert('❌ Setup mislukt.');
     }
   }
 
   async function createDemo() {
+    const density = document.getElementById('density').value;
     try {
-      const density = document.getElementById('density').value;
-      const res = await fetch(API_BASE + '/api/create_demo', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ density })
+      const res = await fetch('/api/create_demo', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({density})
       });
       const data = await res.json();
       if (!res.ok || !data.success) return alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
-
-      alert('✅ Demo gemaakt: ' + data.filename + '\n\nJe vindt hem bij Dashboards.');
-      showStep4();
-    } catch (e) {
+      alert('✅ Demo gemaakt: ' + data.filename);
+      loadDashboards();
+    } catch(e) {
       console.error(e);
       alert('❌ Demo mislukt.');
     }
@@ -1140,43 +1056,34 @@ HTML_PAGE = r"""<!DOCTYPE html>
   async function createMine() {
     const base_title = document.getElementById('dashName').value.trim();
     if (!base_title) return alert('❌ Vul een naam in.');
-
     const density = document.getElementById('density').value;
-    const payload = {
-      base_title,
-      include_overview: true,
-      include_overig: true,
-      include_floor_tabs: true,
-      area_ids: null,
-      density
-    };
 
     try {
-      const res = await fetch(API_BASE + '/api/create_dashboards', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
+      const res = await fetch('/api/create_dashboards', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          base_title,
+          include_overview:true,
+          include_overig:true,
+          include_floor_tabs:true,
+          area_ids:null,
+          density
+        })
       });
       const data = await res.json();
       if (!res.ok || !data.success) return alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
 
-      await reloadDashboards();
-
-      alert('✅ Klaar!\n- ' + data.simple_filename + '\n- ' + data.advanced_filename +
-            '\n\nZe staan nu bij Dashboards (lijst hieronder).');
-      showStep4();
-    } catch (e) {
+      alert('✅ Klaar!\n- ' + data.simple_filename + '\n- ' + data.advanced_filename);
+      loadDashboards();
+    } catch(e) {
       console.error(e);
       alert('❌ Maken mislukt.');
     }
   }
 
-  async function reloadDashboards() {
-    try { await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' }); } catch (e) {}
-  }
-
   async function loadDashboards() {
-    const response = await fetch(API_BASE + '/api/dashboards');
+    const response = await fetch('/api/dashboards');
     const items = await response.json();
 
     const list = document.getElementById('dashboardsList');
@@ -1206,7 +1113,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function deleteDashboard(filename) {
     if (!confirm('Weet je zeker dat je dit dashboard wilt verwijderen?')) return;
-    const response = await fetch(API_BASE + '/api/delete_dashboard', {
+    const response = await fetch('/api/delete_dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename })
@@ -1216,16 +1123,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
       alert('✅ Verwijderd!');
       loadDashboards();
     } else {
-      alert('❌ Fout: ' + (result.error || 'Onbekende fout'));
+      alert('❌ Fout: ' + (result.error || 'Onbekend'));
     }
   }
 
   async function downloadDashboard(filename) {
-    window.open(API_BASE + '/api/download?filename=' + encodeURIComponent(filename), '_blank');
+    window.open('/api/download?filename=' + encodeURIComponent(filename), '_blank');
   }
 
   async function openDebug() {
-    const res = await fetch(API_BASE + '/api/debug/ha');
+    const res = await fetch('/api/debug/ha', {cache:'no-store'});
     const data = await res.json();
     alert(JSON.stringify(data, null, 2));
   }
@@ -1241,63 +1148,69 @@ def index():
     html = HTML_PAGE.replace("__APP_NAME__", APP_NAME).replace("__APP_VERSION__", APP_VERSION)
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
-# --------------------------------------------------------------------------------------
-# API
-# --------------------------------------------------------------------------------------
+# -------------------------
+# API routes
+# -------------------------
 @app.route("/api/config", methods=["GET"])
 def api_config():
-    ok, msg = ha_probe()
+    ok, msg = conn.probe(force=False)
     return jsonify({
         "app_name": APP_NAME,
         "app_version": APP_VERSION,
 
-        "options_json_found": os.path.exists(ADDON_OPTIONS_PATH),
-        "options_keys": sorted(list((_read_options_json() or {}).keys())) if os.path.exists(ADDON_OPTIONS_PATH) else [],
-
         "user_token_configured": bool(USER_TOKEN),
         "supervisor_token_configured": bool(SUPERVISOR_TOKEN),
+        "active_mode": conn.active_mode,
+        "active_base_url": conn.active_base_url,
+        "options_json_found": os.path.exists(ADDON_OPTIONS_PATH),
 
-        "ha_connected": bool(ok),
+        "ha_ok": ok,
+        "ha_mode": conn.active_mode if ok else "none",
         "ha_error": None if ok else msg,
-        "ha_mode": ACTIVE_MODE,
-        "ha_base_url": ACTIVE_BASE_URL,
 
         "dashboards_path": DASHBOARDS_PATH,
         "server_time": datetime.now().isoformat(timespec="seconds"),
-
         "mushroom_installed": mushroom_installed(),
         "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
-        "ha_direct_url": HA_DIRECT_URL,
-        "ha_supervisor_url": HA_SUPERVISOR_URL,
     })
 
 @app.route("/api/debug/ha", methods=["GET"])
 def api_debug_ha():
-    ok, msg = ha_probe()
-    info = {
-        "ok": ok,
-        "probe": msg,
-        "active": {"mode": ACTIVE_MODE, "base_url": ACTIVE_BASE_URL, "token_present": bool(ACTIVE_TOKEN)},
-        "tokens": {"user_token_present": bool(USER_TOKEN), "supervisor_token_present": bool(SUPERVISOR_TOKEN)},
-        "urls": {"direct": HA_DIRECT_URL, "supervisor": HA_SUPERVISOR_URL},
+    info: Dict[str, Any] = {
+        "ha_direct_url": HA_DIRECT_URL,
+        "ha_supervisor_url": HA_SUPERVISOR_URL,
         "options_json": ADDON_OPTIONS_PATH,
         "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
+        "user_token_present": bool(USER_TOKEN),
+        "supervisor_token_present": bool(SUPERVISOR_TOKEN),
+        "active_mode": conn.active_mode,
+        "active_base_url": conn.active_base_url,
+        "last_probe": conn.last_probe,
     }
+    if os.path.exists(ADDON_OPTIONS_PATH):
+        opts = _read_options_json()
+        info["options_keys"] = sorted(list(opts.keys()))
+        info["access_token_in_options"] = bool((opts.get("access_token", "") or "").strip())
+        info["supervisor_token_in_options"] = bool((opts.get("supervisor_token", "") or "").strip())
+
+    ok, msg = conn.probe(force=True)
+    if not ok:
+        return jsonify({"ok": False, "error": msg, "info": info}), 200
+
     try:
-        if ok:
-            r = ha_request("GET", "/api/", timeout=10)
-            return jsonify({"ok": (r.status_code == 200), "status": r.status_code, "body": r.text[:400], "info": info}), 200
-        return jsonify({"ok": False, "error": "No working HA connection", "info": info}), 200
+        r = conn.request("GET", "/api/", timeout=10)
+        return jsonify({"ok": (r.status_code == 200), "status": r.status_code, "body": r.text[:400], "info": info}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "info": info}), 200
 
 @app.route("/api/setup", methods=["POST"])
 def api_setup():
-    ok, msg = ha_probe()
+    ok, msg = conn.probe(force=True)
     if not ok:
         return jsonify({
             "ok": False,
-            "error": f"Geen Home Assistant verbinding. Voeg een Long-Lived Access Token toe als 'access_token' (of plak die token in 'supervisor_token' veld). Details: {msg}",
+            "error": "Geen verbinding met Home Assistant. Zet je Long-Lived Access Token in add-on opties als 'access_token'. "
+                     f"Details: {msg}"
         }), 400
 
     data = request.json or {}
@@ -1309,13 +1222,11 @@ def api_setup():
         steps.append(install_mushroom())
         steps.append(ensure_mushroom_resource())
         steps.append(install_dashboard_theme(preset, density))
+        steps.append(try_set_theme_auto())
 
-        ok_theme, how = ha_try_set_theme(THEME_NAME)
-        steps.append("Theme actief (auto licht/donker)" if ok_theme else "Theme geïnstalleerd (activeren lukte niet, maar je kunt ’m handmatig kiezen)")
-
-        # reload lovelace (best-effort)
+        # reload lovelace best-effort
         ha_call_service("lovelace", "reload", {})
-        steps.append("Lovelace herladen")
+        steps.append("Lovelace vernieuwd")
 
         return jsonify({"ok": True, "steps": steps}), 200
     except Exception as e:
@@ -1344,7 +1255,7 @@ def api_create_demo():
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     data = request.json or {}
-    base_title = (data.get("base_title") or "Thuis").strip()
+    base_title = (data.get("base_title") or "").strip()
     include_overview = bool(data.get("include_overview", True))
     include_overig = bool(data.get("include_overig", True))
     include_floor_tabs = bool(data.get("include_floor_tabs", True))
@@ -1423,10 +1334,6 @@ def api_delete_dashboard():
 
 @app.route("/api/reload_lovelace", methods=["POST"])
 def api_reload_lovelace():
-    ok, msg = ha_probe()
-    if not ok:
-        return jsonify({"ok": False, "error": f"Geen HA verbinding: {msg}"}), 400
-
     candidates = [
         ("lovelace", "reload", {}),
         ("homeassistant", "reload_core_config", {}),
@@ -1443,10 +1350,4 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"{APP_NAME} starting... ({APP_VERSION})")
     print("=" * 60)
-    # warm-up probe (doesn't crash if it fails)
-    try:
-        ok, why = ha_probe()
-        print(f"HA probe: {ok} ({why}) mode={ACTIVE_MODE} base={ACTIVE_BASE_URL}")
-    except Exception as e:
-        print(f"HA probe error: {e}")
     app.run(host="0.0.0.0", port=8099, debug=False)

@@ -10,7 +10,7 @@ import requests
 from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 
-APP_VERSION = "1.2.1-beta-fix-tests"
+APP_VERSION = "1.2.2-beta-ui+tokenfix"
 APP_NAME = "Template Maker Pro"
 
 app = Flask(__name__)
@@ -29,22 +29,16 @@ def _read_file(path: str) -> str:
         return ""
 
 def discover_token() -> str:
-    # Preferred for HAOS add-ons
     tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
     if tok:
         return tok
-
-    # Some environments
     tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
     if tok:
         return tok
-
-    # Common paths inside add-on containers
     for p in ("/var/run/supervisor_token", "/run/supervisor_token"):
         tok = _read_file(p)
         if tok:
             return tok
-
     return ""
 
 SUPERVISOR_TOKEN = discover_token()
@@ -55,9 +49,6 @@ print(f"== {APP_NAME} {APP_VERSION} ==")
 print(f"Config path: {HA_CONFIG_PATH}")
 print(f"Templates path: {TEMPLATES_PATH}")
 print(f"Token available: {bool(SUPERVISOR_TOKEN)}")
-print(f"Token debug: env_SUPERVISOR_TOKEN={bool((os.environ.get('SUPERVISOR_TOKEN','') or '').strip())}, "
-      f"env_HOMEASSISTANT_TOKEN={bool((os.environ.get('HOMEASSISTANT_TOKEN','') or '').strip())}, "
-      f"file(/var/run/supervisor_token)={bool(_read_file('/var/run/supervisor_token'))}")
 
 # -------------------------
 # Helpers
@@ -91,7 +82,7 @@ def safe_yaml_dump(obj: Any) -> str:
         pass
 
     def str_presenter(dumper, data):
-        if "\n" in data:
+        if isinstance(data, str) and "\n" in data:
             return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
         return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
@@ -141,23 +132,7 @@ def ha_request(method: str, path: str, json_body: dict | None = None, timeout: i
     url = f"http://supervisor/core{path}"
     return requests.request(method, url, headers=ha_headers(), json=json_body, timeout=timeout)
 
-def ha_get_states() -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], int]:
-    if not SUPERVISOR_TOKEN:
-        return None, "Geen token in container (SUPERVISOR_TOKEN/HOMEASSISTANT_TOKEN of supervisor_token file).", 400
-    try:
-        resp = ha_request("GET", "/api/states", timeout=12)
-        if resp.status_code != 200:
-            return None, f"HA states fetch failed: {resp.status_code}", resp.status_code
-        return resp.json(), None, 200
-    except Exception as e:
-        return None, str(e), 500
-
 def ha_template_render(template_str: str, variables: dict | None = None) -> Tuple[Dict[str, Any], int]:
-    """
-    Render via /api/template.
-    IMPORTANT: /api/template expects a Jinja template string. It supports {{ ... }} and usually also {% ... %},
-    but we handle fallbacks + return detailed errors.
-    """
     if not SUPERVISOR_TOKEN:
         return {"ok": False, "error": "Geen token in container; kan niet testen tegen Home Assistant."}, 400
 
@@ -171,7 +146,7 @@ def ha_template_render(template_str: str, variables: dict | None = None) -> Tupl
             return {
                 "ok": False,
                 "error": f"HA template render failed: {resp.status_code}",
-                "details": resp.text[:2000]
+                "details": resp.text[:2000],
             }, 400
         return {"ok": True, "result": resp.text}, 200
     except Exception as e:
@@ -190,6 +165,35 @@ def ha_call_service(domain: str, service: str, data: dict | None = None) -> Tupl
             return {"ok": True, "result": resp.text}, 200
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
+
+def get_ha_entities() -> List[Dict[str, Any]]:
+    # Demo data if no token
+    if not SUPERVISOR_TOKEN:
+        return [
+            {"entity_id": "light.woonkamer", "domain": "light", "name": "Woonkamer Lamp"},
+            {"entity_id": "sensor.temp_woonkamer", "domain": "sensor", "name": "Temp Woonkamer"},
+            {"entity_id": "binary_sensor.deur_voordeur", "domain": "binary_sensor", "name": "Voordeur"},
+        ]
+
+    try:
+        resp = ha_request("GET", "/api/states", timeout=12)
+        if resp.status_code != 200:
+            print(f"Failed to fetch entities: {resp.status_code} - {resp.text[:200]}")
+            return []
+        states = resp.json()
+        entities: List[Dict[str, Any]] = []
+        for s in states:
+            entity_id = s.get("entity_id", "")
+            if not entity_id:
+                continue
+            domain = entity_id.split(".")[0] if "." in entity_id else ""
+            attrs = s.get("attributes") or {}
+            friendly = attrs.get("friendly_name", entity_id)
+            entities.append({"entity_id": entity_id, "domain": domain, "name": friendly})
+        return entities
+    except Exception as e:
+        print(f"Error getting entities: {e}")
+        return []
 
 # -------------------------
 # Template Builders
@@ -211,7 +215,6 @@ def build_threshold_state(entities: List[str], threshold: float, mode: str) -> s
     return f"{{{{ ({base} | select('gt', {threshold}) | list | count) > 0 }}}}"
 
 def build_last_changed_human(entity_id: str) -> str:
-    # This contains {% %} -> works in HA template engine, but sometimes users hit edge cases.
     return (
         "{% set e = '" + entity_id + "' %}"
         "{{ as_local(states[e].last_changed).strftime('%Y-%m-%d %H:%M:%S') }}"
@@ -247,14 +250,14 @@ def basic_binary(name: str, uid: str, state: str, icon: str = "", extra: Dict[st
         b.update(extra)
     return {"template": [{"binary_sensor": [b]}]}
 
-# Catalog (meest gangbaar)
+# Common templates
 add_template("count_lights", {
     "title": "💡 Tel lampen aan",
     "kind": "sensor",
     "needs_entities": False,
     "params": [],
     "defaults": {"icon": "mdi:lightbulb-group"},
-    "suggestions": ["Dashboard: laat een badge rood worden als > 0."],
+    "suggestions": ["Dashboard: badge rood als > 0."],
     "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -318,15 +321,15 @@ add_template("threshold_above", {
     "needs_entities": True,
     "params": [
         {"key": "threshold", "label": "Drempelwaarde", "type": "float", "default": 100},
-        {"key": "mode", "label": "Mode", "type": "select", "options": ["any", "all"], "default": "any"}
+        {"key": "mode", "label": "Mode", "type": "select", "options": ["any", "all"], "default": "any"},
     ],
     "defaults": {"icon": "mdi:alert"},
     "suggestions": ["Gebruik voor power > 2000W, humidity > 60%, etc."],
     "entity_filter": {"domains": ["sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_binary(
         name, uid,
-        build_threshold_state(entities or [], float(p.get("threshold", 100)), p.get("mode", "any")),
-        "mdi:alert"
+        build_threshold_state(entities or [], float(p.get("threshold", 100)), str(p.get("mode", "any"))),
+        "mdi:alert",
     ),
 })
 
@@ -341,7 +344,7 @@ add_template("last_changed_human", {
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
         build_last_changed_human((entities or [""])[0]),
-        "mdi:clock-outline"
+        "mdi:clock-outline",
     ),
 })
 
@@ -357,7 +360,7 @@ add_template("age_minutes", {
         name, uid,
         build_state_age_minutes((entities or [""])[0]),
         "mdi:timer-outline",
-        {"unit_of_measurement": "min"}
+        {"unit_of_measurement": "min"},
     ),
 })
 
@@ -372,28 +375,18 @@ add_template("unavailable_count_domain", {
     "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
-        build_unavailable_count(p.get("domain", "sensor")),
-        "mdi:alert-circle"
+        build_unavailable_count(str(p.get("domain", "sensor"))),
+        "mdi:alert-circle",
     ),
 })
 
-# -------------------------
-# Build logic
-# -------------------------
-def build_template_config(
-    template_type: str,
-    name: str,
-    safe_name: str,
-    icon: str,
-    entities: List[str],
-    params: Dict[str, Any],
-):
+def build_template_config(template_type: str, name: str, safe_name: str, icon: str,
+                          entities: List[str], params: Dict[str, Any]):
     if template_type not in TEMPLATE_CATALOG:
         return None, "Ongeldig template type"
 
     spec = TEMPLATE_CATALOG[template_type]
     uid = f"template_{safe_name}"
-
     entities = [e for e in (entities or []) if sanitize_entity_id(e)]
 
     if spec.get("needs_entities"):
@@ -439,18 +432,13 @@ def extract_entity_info(cfg: dict) -> Tuple[str, str]:
     return ("", "")
 
 def validate_generated_config(cfg: dict) -> Tuple[bool, str]:
-    """
-    Sanity validation so /test and /yaml_check return helpful errors.
-    """
     if not isinstance(cfg, dict) or "template" not in cfg:
         return False, "Top-level moet 'template:' bevatten."
     if not isinstance(cfg["template"], list) or not cfg["template"]:
         return False, "'template' moet een lijst zijn met minimaal 1 item."
-
     block = cfg["template"][0]
     if not isinstance(block, dict):
         return False, "Eerste template block is geen dict."
-
     if "sensor" in block:
         items = block["sensor"]
         if not items or not isinstance(items, list):
@@ -465,11 +453,663 @@ def validate_generated_config(cfg: dict) -> Tuple[bool, str]:
             return False, "binary_sensor mist 'name' of 'state'."
     else:
         return False, "Block moet 'sensor' of 'binary_sensor' bevatten."
-
     return True, "OK"
 
 # -------------------------
-# ROUTES
+# Web UI (YOUR full GUI)
+# -------------------------
+@app.route("/")
+def index():
+    html = f"""<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{APP_NAME}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-purple-50 to-blue-100 min-h-screen p-4">
+  <div class="max-w-7xl mx-auto">
+    <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+        <div>
+          <h1 class="text-4xl font-bold text-purple-800">🎨 {APP_NAME}</h1>
+          <p class="text-gray-600 mt-2">Alles-in-één template generator + test tool.</p>
+          <p class="text-xs text-gray-500 mt-1">Versie: <span class="font-mono">{APP_VERSION}</span></p>
+        </div>
+        <div class="flex flex-col items-start sm:items-end gap-2">
+          <div id="status" class="text-sm">
+            <span class="inline-block w-3 h-3 bg-gray-400 rounded-full mr-2 animate-pulse"></span>
+            <span>Verbinding maken...</span>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button onclick="reloadTemplatesInHA()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+              🔄 Reload Template Entities (HA)
+            </button>
+            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+              🧾 Debug HA
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tokenWarning" class="hidden mb-6 bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded">
+        <div class="flex">
+          <div class="flex-shrink-0">⚠️</div>
+          <div class="ml-3">
+            <p class="text-sm text-yellow-700">
+              <strong>Token ontbreekt!</strong> Je kunt YAML genereren, maar <strong>testen/reload</strong> werkt pas met token.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- LEFT -->
+        <div>
+          <div class="mb-4">
+            <label class="block text-lg font-semibold text-gray-700 mb-2">📝 Naam</label>
+            <input type="text" id="templateName" placeholder="bijv. Lampen Teller"
+                   class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-purple-500 focus:outline-none">
+          </div>
+
+          <div class="mb-4">
+            <label class="block text-lg font-semibold text-gray-700 mb-2">🎯 Type</label>
+            <select id="templateType" onchange="onTypeChange()"
+                    class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-purple-500 focus:outline-none">
+              <option value="">-- Kies een template type --</option>
+            </select>
+          </div>
+
+          <div class="mb-4">
+            <label class="block text-lg font-semibold text-gray-700 mb-2">🎨 Icon (mdi)</label>
+            <input type="text" id="templateIcon" placeholder="bijv. mdi:lightbulb-group"
+                   class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-purple-500 focus:outline-none">
+            <p class="text-xs text-gray-500 mt-1">Laat leeg voor standaard per type.</p>
+          </div>
+
+          <div class="mb-4 bg-gray-50 border border-gray-200 p-4 rounded-xl">
+            <div class="flex items-center justify-between gap-3">
+              <div class="font-semibold text-gray-800">💾 Opslag</div>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" id="singleFileMode" class="scale-110">
+                Alles in 1 bestand (<span class="font-mono">template_maker.yaml</span>)
+              </label>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" id="overwriteMode" class="scale-110">
+                Overschrijven als bestaat
+              </label>
+              <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" id="autoSuffixMode" class="scale-110" checked>
+                Anders auto suffix (_2, _3)
+              </label>
+            </div>
+          </div>
+
+          <div id="suggestionsBox" class="mb-4 hidden bg-purple-50 border border-purple-200 p-4 rounded-xl">
+            <div class="font-semibold text-purple-800 mb-2">💡 Suggesties</div>
+            <ul id="suggestionsList" class="list-disc ml-5 text-sm text-purple-900 space-y-1"></ul>
+          </div>
+
+          <div id="paramsBox" class="mb-4 hidden bg-gray-50 border border-gray-200 p-4 rounded-xl">
+            <div class="font-semibold text-gray-800 mb-2">⚙️ Opties</div>
+            <div id="paramsFields" class="space-y-3"></div>
+          </div>
+
+          <div id="entitiesBox" class="mb-4 hidden bg-gray-50 border border-gray-200 p-4 rounded-xl">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
+              <div>
+                <div class="font-semibold text-gray-800">🧩 Entities</div>
+                <div class="text-xs text-gray-500" id="entitiesHint"></div>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="selectAll()" class="text-xs bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">Select all</button>
+                <button onclick="clearAll()" class="text-xs bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">Clear</button>
+              </div>
+            </div>
+
+            <input id="entitySearch" oninput="renderEntities()" placeholder="Zoek entity (naam of entity_id)..."
+                   class="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none mb-3">
+
+            <div id="selectedChips" class="flex flex-wrap gap-2 mb-3"></div>
+
+            <div id="entity-list" class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-72 overflow-y-auto"></div>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+            <button onclick="previewTemplate()"
+                    class="w-full bg-gray-900 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-black transition-all shadow-lg">
+              👀 Preview
+            </button>
+            <button onclick="saveTemplate()"
+                    class="w-full bg-gradient-to-r from-purple-600 to-blue-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-purple-700 hover:to-blue-700 transition-all shadow-lg">
+              💾 Opslaan
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+            <button onclick="testTemplate()"
+                    class="w-full bg-green-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-green-700 transition-all shadow-lg">
+              ✅ Test (Jinja) in HA
+            </button>
+            <button onclick="yamlCheck()"
+                    class="w-full bg-amber-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-amber-700 transition-all shadow-lg">
+              🧰 YAML check
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+            <button onclick="loadTemplates()"
+                    class="w-full bg-gradient-to-r from-gray-600 to-gray-800 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-gray-700 hover:to-gray-900 transition-all shadow-lg">
+              📋 Mijn Templates
+            </button>
+            <button onclick="downloadYaml()"
+                    class="w-full bg-white border border-gray-300 text-gray-800 py-3 px-4 rounded-xl text-lg font-semibold hover:bg-gray-100 transition-all shadow-lg">
+              ⬇️ Download YAML
+            </button>
+            <button onclick="generateAutomation()"
+                    class="w-full bg-indigo-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-indigo-700 transition-all shadow-lg">
+              🤖 Automation snippet
+            </button>
+          </div>
+        </div>
+
+        <!-- RIGHT -->
+        <div>
+          <div id="preview" class="bg-gray-50 p-6 rounded-xl border border-gray-200">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-xl font-bold text-gray-800">🧾 YAML</h3>
+              <div class="flex gap-2">
+                <button onclick="copyYaml()"
+                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+                  📋 Copy
+                </button>
+                <button onclick="copyAutomation()"
+                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+                  📋 Copy automation
+                </button>
+              </div>
+            </div>
+            <pre id="previewCode" class="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[260px]"></pre>
+          </div>
+
+          <div id="testBox" class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-xl font-bold text-gray-800">🧪 Test output</h3>
+              <span id="testBadge" class="text-xs px-2 py-1 rounded bg-gray-200 text-gray-700">Nog niet getest</span>
+            </div>
+            <pre id="testResult" class="bg-gray-50 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[120px] text-gray-800"></pre>
+            <p class="text-xs text-gray-500 mt-2">
+              Test gebruikt Home Assistant <code>/api/template</code> en toont direct de output.
+            </p>
+          </div>
+
+          <div id="automationBox" class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-xl font-bold text-gray-800">🤖 Automation snippet</h3>
+              <span class="text-xs px-2 py-1 rounded bg-gray-200 text-gray-700">Best-effort</span>
+            </div>
+            <pre id="automationCode" class="bg-gray-50 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[120px] text-gray-800"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="templatesList" class="bg-white rounded-2xl shadow-2xl p-8 hidden">
+      <h2 class="text-2xl font-bold text-gray-800 mb-4">📚 Opgeslagen Templates</h2>
+      <div id="templatesContent" class="space-y-3"></div>
+    </div>
+  </div>
+
+<script>
+  let entities = [];
+  let catalog = {{}};
+  let selectedEntities = [];
+
+  const API_BASE = window.location.pathname.replace(/\\/$/, '');
+
+  function setStatus(text, color = 'gray') {{
+    document.getElementById('status').innerHTML =
+      '<span class="inline-block w-3 h-3 bg-' + color + '-500 rounded-full mr-2"></span>' +
+      '<span class="text-' + color + '-700">' + text + '</span>';
+  }}
+
+  function escapeHtml(str) {{
+    return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }}
+
+  async function init() {{
+    setStatus('Verbinden...', 'yellow');
+
+    try {{
+      const cfgRes = await fetch(API_BASE + '/api/config');
+      const cfg = await cfgRes.json();
+      if (!cfg.token_configured) document.getElementById('tokenWarning').classList.remove('hidden');
+
+      const catRes = await fetch(API_BASE + '/api/catalog');
+      catalog = await catRes.json();
+
+      const typeSelect = document.getElementById('templateType');
+      Object.keys(catalog).forEach(key => {{
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = catalog[key].title;
+        typeSelect.appendChild(opt);
+      }});
+
+      const entRes = await fetch(API_BASE + '/api/entities');
+      entities = await entRes.json();
+
+      setStatus('Verbonden (' + entities.length + ' entities)', 'green');
+      document.getElementById('previewCode').textContent = '# Kies een type en klik Preview.';
+      document.getElementById('testResult').textContent = '—';
+      document.getElementById('automationCode').textContent = '—';
+    }} catch (e) {{
+      console.error(e);
+      setStatus('Verbinding mislukt', 'red');
+    }}
+  }}
+
+  function renderSuggestions(typeKey) {{
+    const box = document.getElementById('suggestionsBox');
+    const list = document.getElementById('suggestionsList');
+    list.innerHTML = '';
+    const s = (catalog[typeKey] && catalog[typeKey].suggestions) || [];
+    if (!s.length) {{ box.classList.add('hidden'); return; }}
+    s.forEach(item => {{
+      const li = document.createElement('li');
+      li.textContent = item;
+      list.appendChild(li);
+    }});
+    box.classList.remove('hidden');
+  }}
+
+  function renderParams(typeKey) {{
+    const box = document.getElementById('paramsBox');
+    const fields = document.getElementById('paramsFields');
+    fields.innerHTML = '';
+    const params = (catalog[typeKey] && catalog[typeKey].params) || [];
+    if (!params.length) {{ box.classList.add('hidden'); return; }}
+
+    params.forEach(p => {{
+      const wrap = document.createElement('div');
+      const label = document.createElement('label');
+      label.className = 'block text-sm font-semibold text-gray-700 mb-1';
+      label.textContent = p.label;
+
+      let input;
+      if (p.type === 'select') {{
+        input = document.createElement('select');
+        input.className = 'w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none';
+        (p.options || []).forEach(optVal => {{
+          const opt = document.createElement('option');
+          opt.value = optVal;
+          opt.textContent = optVal;
+          input.appendChild(opt);
+        }});
+        if (p.default !== undefined) input.value = p.default;
+      }} else {{
+        input = document.createElement('input');
+        input.type = (p.type === 'int' || p.type === 'float') ? 'number' : 'text';
+        if (p.type === 'float') input.step = 'any';
+        input.className = 'w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:border-purple-500 focus:outline-none';
+        if (p.default !== undefined) input.value = p.default;
+      }}
+
+      input.id = 'param__' + p.key;
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      fields.appendChild(wrap);
+    }});
+
+    box.classList.remove('hidden');
+  }}
+
+  function renderSelectedChips() {{
+    const box = document.getElementById('selectedChips');
+    box.innerHTML = '';
+    selectedEntities.slice(0, 50).forEach(eid => {{
+      const chip = document.createElement('div');
+      chip.className = 'text-xs bg-purple-100 border border-purple-200 text-purple-900 px-2 py-1 rounded-full flex items-center gap-2';
+      chip.innerHTML = '<span class="font-mono">' + escapeHtml(eid) + '</span>' +
+                       '<button class="text-purple-700 hover:text-purple-900" title="remove">✕</button>';
+      chip.querySelector('button').onclick = () => {{
+        selectedEntities = selectedEntities.filter(x => x !== eid);
+        renderEntities();
+        renderSelectedChips();
+      }};
+      box.appendChild(chip);
+    }});
+  }}
+
+  function toggleEntity(el, entityId) {{
+    const i = selectedEntities.indexOf(entityId);
+    if (i > -1) {{
+      selectedEntities.splice(i, 1);
+      el.classList.remove('bg-purple-100','border-purple-500');
+      el.classList.add('border-gray-200');
+    }} else {{
+      selectedEntities.push(entityId);
+      el.classList.add('bg-purple-100','border-purple-500');
+      el.classList.remove('border-gray-200');
+    }}
+    renderSelectedChips();
+  }}
+
+  function renderEntities() {{
+    const typeKey = document.getElementById('templateType').value;
+    const needs = catalog[typeKey] && catalog[typeKey].needs_entities;
+
+    const box = document.getElementById('entitiesBox');
+    const list = document.getElementById('entity-list');
+    const hint = document.getElementById('entitiesHint');
+    list.innerHTML = '';
+
+    if (!needs) {{
+      box.classList.add('hidden');
+      return;
+    }}
+
+    hint.textContent = (typeKey === 'last_changed_human' || typeKey === 'age_minutes') ? 'Selecteer precies 1 entity.' : 'Selecteer 1 of meer entities.';
+
+    let filtered = entities;
+    const domains = (catalog[typeKey] && catalog[typeKey].entity_filter && catalog[typeKey].entity_filter.domains) || [];
+    if (domains.length) {{
+      filtered = filtered.filter(e => domains.includes(e.domain));
+    }}
+
+    const q = (document.getElementById('entitySearch').value || '').toLowerCase().trim();
+    if (q) {{
+      filtered = filtered.filter(e => (String(e.name||'').toLowerCase().includes(q) || String(e.entity_id||'').toLowerCase().includes(q)));
+    }}
+
+    filtered.forEach(e_attach => {{
+      const div = document.createElement('div');
+      div.className = 'entity-select p-3 border-2 border-gray-200 rounded-lg cursor-pointer hover:bg-purple-50 hover:border-purple-300 transition-all';
+      if (selectedEntities.includes(e_attach.entity_id)) {{
+        div.classList.add('bg-purple-100','border-purple-500');
+        div.classList.remove('border-gray-200');
+      }}
+      div.innerHTML =
+        '<div class="font-semibold text-sm">' + escapeHtml(e_attach.name) + '</div>' +
+        '<div class="text-xs text-gray-500 font-mono">' + escapeHtml(e_attach.entity_id) + '</div>';
+      div.onclick = () => toggleEntity(div, e_attach.entity_id);
+      list.appendChild(div);
+    }});
+
+    box.classList.remove('hidden');
+  }}
+
+  function onTypeChange() {{
+    const typeKey = document.getElementById('templateType').value;
+    renderSuggestions(typeKey);
+    renderParams(typeKey);
+
+    const iconInput = document.getElementById('templateIcon');
+    if ((!iconInput.value || !iconInput.value.trim()) && catalog[typeKey] && catalog[typeKey].defaults && catalog[typeKey].defaults.icon) {{
+      iconInput.value = catalog[typeKey].defaults.icon;
+    }}
+
+    selectedEntities = [];
+    renderSelectedChips();
+    document.getElementById('entitySearch').value = '';
+    renderEntities();
+  }}
+
+  function collectParams(typeKey) {{
+    const params = (catalog[typeKey] && catalog[typeKey].params) || [];
+    const out = {{}};
+    params.forEach(p => {{
+      const el = document.getElementById('param__' + p.key);
+      if (!el) return;
+      let v = el.value;
+      if (p.type === 'int') v = parseInt(v || '0', 10);
+      if (p.type === 'float') v = parseFloat(v || '0');
+      out[p.key] = v;
+    }});
+    return out;
+  }}
+
+  function currentPayload() {{
+    const name = document.getElementById('templateName').value.trim();
+    const type = document.getElementById('templateType').value;
+    const icon = document.getElementById('templateIcon').value.trim();
+    const params = collectParams(type);
+
+    const single_file = document.getElementById('singleFileMode').checked;
+    const overwrite = document.getElementById('overwriteMode').checked;
+    const auto_suffix = document.getElementById('autoSuffixMode').checked;
+
+    return {{ name, type, icon, entities: selectedEntities, params, single_file, overwrite, auto_suffix }};
+  }}
+
+  function setTestBadge(ok, label) {{
+    const badge = document.getElementById('testBadge');
+    if (ok) {{
+      badge.className = 'text-xs px-2 py-1 rounded bg-green-100 text-green-700';
+      badge.textContent = label || 'OK';
+    }} else {{
+      badge.className = 'text-xs px-2 py-1 rounded bg-red-100 text-red-700';
+      badge.textContent = label || 'Mislukt';
+    }}
+  }}
+
+  async function previewTemplate() {{
+    const p = currentPayload();
+    if (!p.name) return alert('❌ Vul een naam in!');
+    if (!p.type) return alert('❌ Kies een template type!');
+
+    const res = await fetch(API_BASE + '/api/preview_template', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(p)
+    }});
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
+    document.getElementById('previewCode').textContent = data.code;
+  }}
+
+  async function saveTemplate() {{
+    const p = currentPayload();
+    if (!p.name) return alert('❌ Vul een naam in!');
+    if (!p.type) return alert('❌ Kies een template type!');
+
+    const res = await fetch(API_BASE + '/api/create_template', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(p)
+    }});
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
+    document.getElementById('previewCode').textContent = data.code;
+    alert('✅ Opgeslagen als ' + data.filename + '\\n\\nTip: druk op Reload Template Entities in HA.');
+  }}
+
+  async function testTemplate() {{
+    const p = currentPayload();
+    if (!p.name) return alert('❌ Vul een naam in!');
+    if (!p.type) return alert('❌ Kies een template type!');
+
+    const res = await fetch(API_BASE + '/api/test_template', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(p)
+    }});
+    const data = await res.json();
+    const out = document.getElementById('testResult');
+
+    if (!res.ok || !data.ok) {{
+      setTestBadge(false, 'Test mislukt');
+      out.textContent = (data.error || 'Onbekende fout') + (data.details ? ('\\n\\n' + data.details) : '');
+      return;
+    }}
+
+    setTestBadge(true, 'OK');
+    out.textContent = data.result;
+  }}
+
+  async function yamlCheck() {{
+    const p = currentPayload();
+    if (!p.name) return alert('❌ Vul een naam in!');
+    if (!p.type) return alert('❌ Kies een template type!');
+
+    const res = await fetch(API_BASE + '/api/yaml_check', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(p)
+    }});
+    const data = await res.json();
+    const out = document.getElementById('testResult');
+
+    if (!res.ok || !data.ok) {{
+      setTestBadge(false, 'YAML check fail');
+      out.textContent = (data.error || 'Onbekende fout') + (data.details ? ('\\n\\n' + data.details) : '');
+      return;
+    }}
+
+    setTestBadge(true, 'YAML OK');
+    out.textContent = data.result || 'OK';
+  }}
+
+  async function reloadTemplatesInHA() {{
+    const res = await fetch(API_BASE + '/api/reload_templates', {{ method: 'POST' }});
+    const data = await res.json();
+    if (!res.ok || !data.ok) {{
+      return alert('❌ Reload failed: ' + (data.error || 'Onbekend') + (data.details ? ('\\n\\n' + JSON.stringify(data.details)) : ''));
+    }}
+    alert('✅ Reload request verstuurd: ' + (data.result || 'OK'));
+  }}
+
+  async function loadTemplates() {{
+    const response = await fetch(API_BASE + '/api/templates');
+    const templates = await response.json();
+
+    const list = document.getElementById('templatesList');
+    const content = document.getElementById('templatesContent');
+
+    if (!templates.length) {{
+      list.classList.add('hidden');
+      return alert('Nog geen templates aangemaakt!');
+    }}
+
+    list.classList.remove('hidden');
+
+    let html = '';
+    templates.forEach(t => {{
+      html += '<div class="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
+      html += '<div><div class="font-semibold">' + escapeHtml(t.name) + '</div>';
+      html += '<div class="text-sm text-gray-500 font-mono">' + escapeHtml(t.filename) + '</div></div>';
+      html += '<div class="flex gap-2 flex-wrap">';
+      html += '<button onclick="openTemplate(\\'' + t.filename + '\\')" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">📄 Open</button>';
+      html += '<button onclick="downloadExisting(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
+      html += '<button onclick="deleteTemplate(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
+      html += '</div></div>';
+    }});
+
+    content.innerHTML = html;
+    list.scrollIntoView({{ behavior: 'smooth' }});
+  }}
+
+  async function openTemplate(filename) {{
+    const res = await fetch(API_BASE + '/api/template?filename=' + encodeURIComponent(filename));
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Kon template niet openen'));
+    document.getElementById('previewCode').textContent = data.code;
+    document.getElementById('templateName').value = data.name_guess || '';
+  }}
+
+  async function deleteTemplate(filename) {{
+    if (!confirm('Weet je zeker dat je ' + filename + ' wilt verwijderen?')) return;
+
+    const response = await fetch(API_BASE + '/api/delete_template', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ filename }})
+    }});
+
+    const result = await response.json();
+    if (response.ok) {{
+      alert('✅ Template verwijderd!');
+      loadTemplates();
+    }} else {{
+      alert('❌ Fout: ' + (result.error || 'Onbekende fout'));
+    }}
+  }}
+
+  function copyYaml() {{
+    const text = document.getElementById('previewCode').textContent || '';
+    navigator.clipboard.writeText(text).then(() => alert('📋 YAML gekopieerd!'));
+  }}
+
+  function copyAutomation() {{
+    const text = document.getElementById('automationCode').textContent || '';
+    if (!text || text === '—') return alert('Nog geen automation snippet.');
+    navigator.clipboard.writeText(text).then(() => alert('📋 Automation gekopieerd!'));
+  }}
+
+  async function downloadYaml() {{
+    const code = document.getElementById('previewCode').textContent || '';
+    if (!code || code.startsWith('# Kies')) return alert('Geen YAML om te downloaden. Maak eerst een preview.');
+    const blob = new Blob([code], {{ type: 'text/yaml' }});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'template.yaml';
+    a.click();
+    URL.revokeObjectURL(url);
+  }}
+
+  async function downloadExisting(filename) {{
+    window.open(API_BASE + '/api/download?filename=' + encodeURIComponent(filename), '_blank');
+  }}
+
+  function selectAll() {{
+    const list = document.getElementById('entity-list');
+    const cards = list.querySelectorAll('.entity-select');
+    cards.forEach(card => {{
+      const eid = card.querySelector('.font-mono')?.textContent || '';
+      if (eid && !selectedEntities.includes(eid)) selectedEntities.push(eid);
+    }});
+    renderEntities();
+    renderSelectedChips();
+  }}
+
+  function clearAll() {{
+    selectedEntities = [];
+    renderEntities();
+    renderSelectedChips();
+  }}
+
+  async function generateAutomation() {{
+    const p = currentPayload();
+    if (!p.name) return alert('❌ Vul een naam in!');
+    if (!p.type) return alert('❌ Kies een template type!');
+    const res = await fetch(API_BASE + '/api/automation_snippet', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify(p)
+    }});
+    const data = await res.json();
+    if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
+    document.getElementById('automationCode').textContent = data.code || '—';
+  }}
+
+  async function openDebug() {{
+    const res = await fetch(API_BASE + '/api/debug/ha');
+    const data = await res.json();
+    alert(JSON.stringify(data, null, 2));
+  }}
+
+  init();
+</script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+# -------------------------
+# API routes
 # -------------------------
 @app.route("/api/config", methods=["GET"])
 def api_config():
@@ -481,11 +1121,21 @@ def api_config():
         "server_time": datetime.now().isoformat(timespec="seconds"),
     })
 
+@app.route("/api/debug/ha", methods=["GET"])
+def api_debug_ha():
+    if not SUPERVISOR_TOKEN:
+        return jsonify({"ok": False, "error": "No token in container."}), 200
+    try:
+        r = ha_request("GET", "/api/", timeout=10)
+        return jsonify({"ok": True, "status": r.status_code, "body": r.text[:400]}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
 @app.route("/api/catalog", methods=["GET"])
 def api_catalog():
-    out = {}
+    meta = {}
     for k, v in TEMPLATE_CATALOG.items():
-        out[k] = {
+        meta[k] = {
             "title": v.get("title"),
             "needs_entities": bool(v.get("needs_entities")),
             "params": v.get("params", []),
@@ -494,48 +1144,11 @@ def api_catalog():
             "kind": v.get("kind", ""),
             "entity_filter": v.get("entity_filter", {"domains": []}),
         }
-    return jsonify(out)
-
-@app.route("/api/debug/ha", methods=["GET"])
-def api_debug_ha():
-    """
-    Debug endpoint to see why HA calls fail.
-    """
-    if not SUPERVISOR_TOKEN:
-        return jsonify({"ok": False, "error": "No token in container."}), 200
-
-    # test call
-    try:
-        r = ha_request("GET", "/api/", timeout=10)
-        return jsonify({"ok": True, "status": r.status_code, "body": r.text[:300]}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200
+    return jsonify(meta)
 
 @app.route("/api/entities", methods=["GET"])
 def api_entities():
-    if not SUPERVISOR_TOKEN:
-        # demo to keep UI working
-        return jsonify([
-            {"entity_id": "light.woonkamer", "domain": "light", "name": "Woonkamer Lamp"},
-            {"entity_id": "sensor.temp_woonkamer", "domain": "sensor", "name": "Temp Woonkamer"},
-            {"entity_id": "binary_sensor.deur_voordeur", "domain": "binary_sensor", "name": "Voordeur"},
-        ])
-
-    states, err, status = ha_get_states()
-    if err:
-        print(f"Entities error: {err} ({status})")
-        return jsonify([])
-
-    entities = []
-    for s in states or []:
-        entity_id = s.get("entity_id", "")
-        if not entity_id:
-            continue
-        domain = entity_id.split(".")[0] if "." in entity_id else ""
-        attrs = s.get("attributes") or {}
-        friendly = attrs.get("friendly_name", entity_id)
-        entities.append({"entity_id": entity_id, "domain": domain, "name": friendly})
-    return jsonify(entities)
+    return jsonify(get_ha_entities())
 
 @app.route("/api/templates", methods=["GET"])
 def api_templates():
@@ -654,9 +1267,6 @@ def api_delete():
 
 @app.route("/api/test_template", methods=["POST"])
 def api_test_template():
-    """
-    Robust tester: returns full HA error details.
-    """
     data = request.json or {}
     template_type = (data.get("type") or "").strip()
     name = (data.get("name") or "Nieuwe Sensor").strip()
@@ -677,14 +1287,8 @@ def api_test_template():
     if not state_tpl:
         return jsonify({"ok": False, "error": "Geen state template gevonden."}), 400
 
-    # Attempt direct render
-    r, status = ha_template_render(state_tpl, variables={})
-    if r.get("ok"):
-        return jsonify(r), 200
-
-    # Fallback: If template contains {% %}, HA might still support it,
-    # but if it fails, we provide a clearer diagnostic
-    return jsonify(r), status
+    result, status = ha_template_render(state_tpl, variables={})
+    return jsonify(result), status
 
 @app.route("/api/yaml_check", methods=["POST"])
 def api_yaml_check():
@@ -706,19 +1310,18 @@ def api_yaml_check():
 
     code = safe_yaml_dump(cfg)
 
-    # YAML parse check (local)
     try:
         yaml.safe_load(code)
     except Exception as e:
         return jsonify({"ok": False, "error": "YAML parse error", "details": str(e)}), 400
 
-    # Optional: Jinja render check
-    state_tpl = extract_first_state_template(cfg)
-    if state_tpl and SUPERVISOR_TOKEN:
-        r, _ = ha_template_render(state_tpl, variables={})
-        if r.get("ok"):
-            return jsonify({"ok": True, "result": "YAML parse OK + Jinja render OK."}), 200
-        return jsonify({"ok": False, "error": "Jinja render failed", "details": r.get("details") or r.get("error")}), 400
+    if SUPERVISOR_TOKEN:
+        st = extract_first_state_template(cfg)
+        if st:
+            r, _ = ha_template_render(st, variables={})
+            if r.get("ok"):
+                return jsonify({"ok": True, "result": "YAML parse OK + Jinja render OK."}), 200
+            return jsonify({"ok": False, "error": "Jinja render failed", "details": r.get("details") or r.get("error")}), 400
 
     return jsonify({"ok": True, "result": "YAML parse OK."}), 200
 
@@ -727,7 +1330,6 @@ def api_reload_templates():
     if not SUPERVISOR_TOKEN:
         return jsonify({"ok": False, "error": "Geen token in container."}), 400
 
-    # Most common service for template reload
     candidates = [
         ("template", "reload", {}),
         ("homeassistant", "reload_core_config", {}),
@@ -760,28 +1362,19 @@ def api_automation_snippet():
     if not kind or not uid:
         return jsonify({"error": "Kon unique_id/kind niet bepalen."}), 400
 
-    trigger_mode = "state"
-    threshold = None
-    if kind == "sensor" and template_type in ("sum_power", "average_temp"):
-        trigger_mode = "numeric_state"
-        threshold = 0
+    trigger = {"platform": "state", "entity_id": f"{kind}.{uid.replace('template_', '')}"}
 
     snippet = {
         "alias": f"Reageer op {name}",
         "mode": "single",
-        "trigger": [{"platform": "numeric_state" if trigger_mode == "numeric_state" else "state",
-                     "entity_id": f"{kind}.{uid.replace('template_', '')}",
-                     **({"above": threshold} if trigger_mode == "numeric_state" else {})}],
-        "action": [{"service": "persistent_notification.create",
-                    "data": {"title": "Template Maker", "message": f"{name} triggerde de automation."}}]
+        "trigger": [trigger],
+        "action": [{
+            "service": "persistent_notification.create",
+            "data": {"title": "Template Maker", "message": f"{name} triggerde de automation."}
+        }]
     }
 
     return jsonify({"ok": True, "code": safe_yaml_dump(snippet)})
-
-# UI route: keep your existing UI if you want; for now just show minimal redirect hint.
-@app.route("/")
-def root():
-    return ("<h2>Template Maker Pro draait.</h2><p>Open de web UI route die jij al had, of integreer je HTML opnieuw.</p>", 200)
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)

@@ -15,16 +15,52 @@ APP_NAME = "Template Maker Pro"
 
 app = Flask(__name__)
 
+# Paths
 HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 TEMPLATES_PATH = os.environ.get("TEMPLATES_PATH") or os.path.join(HA_CONFIG_PATH, "include", "templates")
-SUPERVISOR_TOKEN = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
+
+# Token discovery (HAOS add-on)
+def _read_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return (f.read() or "").strip()
+    except Exception:
+        return ""
+
+def discover_token() -> str:
+    # 1) Official supervisor injected env var for add-ons
+    tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
+    if tok:
+        return tok
+
+    # 2) Some bases expose HOMEASSISTANT_TOKEN
+    tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
+    if tok:
+        return tok
+
+    # 3) Common location inside add-on containers
+    tok = _read_file("/var/run/supervisor_token")
+    if tok:
+        return tok
+
+    # 4) Old/alt locations (harmless if missing)
+    tok = _read_file("/run/supervisor_token")
+    if tok:
+        return tok
+
+    return ""
+
+SUPERVISOR_TOKEN = discover_token()
 
 Path(TEMPLATES_PATH).mkdir(parents=True, exist_ok=True)
 
 print(f"== {APP_NAME} {APP_VERSION} ==")
 print(f"Config path: {HA_CONFIG_PATH}")
 print(f"Templates path: {TEMPLATES_PATH}")
-print(f"Supervisor token available: {bool(SUPERVISOR_TOKEN)}")
+print(f"Token available: {bool(SUPERVISOR_TOKEN)}")
+print(f"Token sources: env(SUPERVISOR_TOKEN)={bool((os.environ.get('SUPERVISOR_TOKEN','') or '').strip())}, "
+      f"env(HOMEASSISTANT_TOKEN)={bool((os.environ.get('HOMEASSISTANT_TOKEN','') or '').strip())}, "
+      f"file(/var/run/supervisor_token)={bool(_read_file('/var/run/supervisor_token'))}")
 
 # -------------------------
 # Helpers
@@ -44,21 +80,18 @@ def sanitize_entity_id(e: str) -> Optional[str]:
     e = e.strip()
     if not e or "." not in e:
         return None
-    # permissive but safe
     if not re.match(r"^[a-zA-Z0-9_]+\.[a-zA-Z0-9_]+$", e):
         return None
     return e
 
-def ha_headers():
+def ha_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
         "Content-Type": "application/json",
     }
 
-def safe_yaml_dump(obj) -> str:
-    """
-    Dump YAML with multiline strings using | style.
-    """
+def safe_yaml_dump(obj: Any) -> str:
+    """Dump YAML with multiline strings using | style."""
     class Dumper(yaml.SafeDumper):
         pass
 
@@ -83,7 +116,6 @@ def is_safe_filename(filename: str) -> bool:
         return False
     if ".." in filename or "/" in filename or "\\" in filename:
         return False
-    # allow letters numbers underscore dash dot
     return bool(re.match(r"^[a-zA-Z0-9._-]+\.yaml$", filename))
 
 def list_yaml_files(dir_path: str) -> List[str]:
@@ -96,87 +128,46 @@ def list_yaml_files(dir_path: str) -> List[str]:
     return sorted(out)
 
 def next_available_filename(base_dir: str, desired: str) -> str:
-    """
-    If desired exists, returns desired_2.yaml, desired_3.yaml, ...
-    """
     if not desired.endswith(".yaml"):
-        desired = desired + ".yaml"
+        desired += ".yaml"
     if not os.path.exists(os.path.join(base_dir, desired)):
         return desired
-
     stem = desired[:-5]
     for i in range(2, 999):
         cand = f"{stem}_{i}.yaml"
         if not os.path.exists(os.path.join(base_dir, cand)):
             return cand
-    # fallback
     return f"{stem}_{int(datetime.now().timestamp())}.yaml"
 
-def get_ha_entities() -> List[Dict[str, Any]]:
+# -------------------------
+# Home Assistant API calls (Supervisor proxy)
+# -------------------------
+
+def ha_get_states() -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], int]:
     """
-    Fetch HA states; returns list with entity_id, domain, name, state, attributes.
+    Returns (states, error, http_status_for_error).
     """
     if not SUPERVISOR_TOKEN:
-        # Demo set
-        return [
-            {"entity_id": "light.woonkamer", "domain": "light", "name": "Woonkamer Lamp", "state": "on",
-             "attributes": {"friendly_name": "Woonkamer Lamp"}},
-            {"entity_id": "light.keuken", "domain": "light", "name": "Keuken Lamp", "state": "off",
-             "attributes": {"friendly_name": "Keuken Lamp"}},
-            {"entity_id": "sensor.temp_woonkamer", "domain": "sensor", "name": "Temp Woonkamer", "state": "21.5",
-             "attributes": {"friendly_name": "Temp Woonkamer", "device_class": "temperature", "unit_of_measurement": "°C"}},
-            {"entity_id": "sensor.humidity_woonkamer", "domain": "sensor", "name": "Humidity Woonkamer", "state": "45",
-             "attributes": {"friendly_name": "Humidity Woonkamer", "device_class": "humidity", "unit_of_measurement": "%"}},
-            {"entity_id": "binary_sensor.deur_voordeur", "domain": "binary_sensor", "name": "Voordeur", "state": "off",
-             "attributes": {"friendly_name": "Voordeur", "device_class": "door"}},
-            {"entity_id": "person.jan", "domain": "person", "name": "Jan", "state": "home",
-             "attributes": {"friendly_name": "Jan"}},
-            {"entity_id": "sensor.power_total", "domain": "sensor", "name": "Power Total", "state": "420",
-             "attributes": {"friendly_name": "Power Total", "device_class": "power", "unit_of_measurement": "W"}},
-            {"entity_id": "sensor.energy_total", "domain": "sensor", "name": "Energy Total", "state": "12.345",
-             "attributes": {"friendly_name": "Energy Total", "device_class": "energy", "unit_of_measurement": "kWh"}},
-            {"entity_id": "climate.woonkamer", "domain": "climate", "name": "Thermostaat", "state": "heat",
-             "attributes": {"friendly_name": "Thermostaat", "hvac_action": "heating"}},
-        ]
-
+        return None, "Geen token gevonden in container (SUPERVISOR_TOKEN/HOMEASSISTANT_TOKEN of supervisor_token file).", 400
     try:
-        resp = requests.get("http://supervisor/core/api/states", headers=ha_headers(), timeout=12)
+        url = "http://supervisor/core/api/states"
+        resp = requests.get(url, headers=ha_headers(), timeout=12)
         if resp.status_code != 200:
-            print(f"Failed to fetch entities: {resp.status_code} - {resp.text[:200]}")
-            return []
-        states = resp.json()
-        entities = []
-        for s in states:
-            entity_id = s.get("entity_id", "")
-            if not entity_id:
-                continue
-            domain = entity_id.split(".")[0] if "." in entity_id else ""
-            attrs = s.get("attributes") or {}
-            friendly = attrs.get("friendly_name", entity_id)
-            entities.append({
-                "entity_id": entity_id,
-                "domain": domain,
-                "name": friendly,
-                "state": s.get("state"),
-                "attributes": attrs
-            })
-        return entities
+            return None, f"HA states fetch failed: {resp.status_code}", resp.status_code
+        return resp.json(), None, 200
     except Exception as e:
-        print(f"Error getting entities: {e}")
-        return []
+        return None, str(e), 500
 
 def ha_template_render(template_str: str, variables: dict | None = None) -> Tuple[Dict[str, Any], int]:
-    """
-    Test template via Home Assistant /api/template (returns plain text result).
-    """
     if not SUPERVISOR_TOKEN:
-        return {"ok": False, "error": "Geen SUPERVISOR_TOKEN ingesteld (kan niet testen tegen Home Assistant)."}, 400
+        return {"ok": False, "error": "Geen token in container. Dit is geen app.py probleem: je add-on krijgt het token niet geïnjecteerd."}, 400
 
     payload = {"template": template_str}
     if variables:
         payload["variables"] = variables
 
     try:
+        # Supervisor proxy to Core endpoint
         resp = requests.post("http://supervisor/core/api/template", headers=ha_headers(), json=payload, timeout=15)
         if resp.status_code != 200:
             return {"ok": False, "error": f"HA template test failed: {resp.status_code}", "details": resp.text}, 400
@@ -185,71 +176,29 @@ def ha_template_render(template_str: str, variables: dict | None = None) -> Tupl
         return {"ok": False, "error": str(e)}, 500
 
 def ha_call_service(domain: str, service: str, data: dict | None = None) -> Tuple[Dict[str, Any], int]:
-    """
-    Call HA service via /api/services/{domain}/{service}
-    """
     if not SUPERVISOR_TOKEN:
-        return {"ok": False, "error": "Geen SUPERVISOR_TOKEN ingesteld (kan geen service call doen)."}, 400
+        return {"ok": False, "error": "Geen token in container. Kan geen service call doen."}, 400
     data = data or {}
     try:
         url = f"http://supervisor/core/api/services/{domain}/{service}"
         resp = requests.post(url, headers=ha_headers(), json=data, timeout=15)
         if resp.status_code not in (200, 201):
             return {"ok": False, "error": f"Service call failed: {resp.status_code}", "details": resp.text}, 400
-        return {"ok": True, "result": resp.json()}, 200
+        # Some services return JSON list
+        try:
+            return {"ok": True, "result": resp.json()}, 200
+        except Exception:
+            return {"ok": True, "result": resp.text}, 200
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
-
-def ha_yaml_check(yaml_text: str) -> Tuple[Dict[str, Any], int]:
-    """
-    Best-effort YAML check in HA.
-    HA heeft endpoints die per versie verschillen. We proberen een paar bekende.
-    Als het niet lukt: val terug op Python YAML parse.
-    """
-    # 1) Python parse (altijd)
-    try:
-        yaml.safe_load(yaml_text)
-    except Exception as e:
-        return {"ok": False, "error": "YAML parse error", "details": str(e)}, 400
-
-    if not SUPERVISOR_TOKEN:
-        return {"ok": True, "result": "YAML parse OK (offline)."}, 200
-
-    # 2) Probe some endpoints (niet gegarandeerd)
-    candidates = [
-        ("http://supervisor/core/api/config/core/check_config", "POST", None),
-        ("http://supervisor/core/api/config/core/check_config", "GET", None),
-        ("http://supervisor/core/api/config/core/check_config", "POST", {"yaml": yaml_text}),
-    ]
-    for url, method, body in candidates:
-        try:
-            if method == "GET":
-                resp = requests.get(url, headers=ha_headers(), timeout=12)
-            else:
-                resp = requests.post(url, headers=ha_headers(), json=(body or {}), timeout=12)
-
-            # Als endpoint bestaat maar geen access → 401/404/405 etc.
-            if resp.status_code in (404, 405):
-                continue
-            if resp.status_code >= 400:
-                # endpoint bestaat maar meldt error
-                return {"ok": False, "error": f"HA config check failed: {resp.status_code}", "details": resp.text}, 400
-            return {"ok": True, "result": resp.text or "HA config check OK."}, 200
-        except Exception:
-            continue
-
-    # fallback
-    return {"ok": True, "result": "YAML parse OK. (HA check endpoint niet beschikbaar)"},
-    200
 
 # -------------------------
 # Template Builders
 # -------------------------
 
 def entities_to_jinja_list(entities: List[str]) -> str:
-    entities = entities or []
     safe = []
-    for e in entities:
+    for e in (entities or []):
         se = sanitize_entity_id(e)
         if se:
             safe.append(se)
@@ -268,11 +217,6 @@ def build_any_state_match(entities: List[str], states: List[str]) -> str:
     st = "[" + ", ".join([f"'{s}'" for s in states]) + "]"
     return f"{{{{ ({lst} | map('states') | select('in', {st}) | list | count) > 0 }}}}"
 
-def build_all_state_match(entities: List[str], state_value: str) -> str:
-    lst = entities_to_jinja_list(entities)
-    base = f"{lst} | map('states') | list"
-    return f"{{{{ ({base} | select('eq','{state_value}') | list | count) == ({base} | length) and ({base} | length) > 0 }}}}"
-
 def build_last_changed_human(entity_id: str) -> str:
     return (
         "{% set e = '" + entity_id + "' %}"
@@ -280,28 +224,15 @@ def build_last_changed_human(entity_id: str) -> str:
     )
 
 def build_state_age_minutes(entity_id: str) -> str:
-    # minutes since last_changed
     return (
         "{% set e = '" + entity_id + "' %}"
         "{{ ((now() - states[e].last_changed).total_seconds() / 60) | round(0) }}"
     )
 
 def build_unavailable_count(domain: str) -> str:
-    # counts unknown/unavailable in a domain
-    return (
-        f"{{{{ states.{domain} | selectattr('state','in',['unknown','unavailable']) | list | count }}}}"
-    )
+    return f"{{{{ states.{domain} | selectattr('state','in',['unknown','unavailable']) | list | count }}}}"
 
-# Catalog spec:
-# - title
-# - kind: sensor/binary_sensor
-# - needs_entities bool
-# - params list
-# - defaults dict
-# - suggestions list
-# - entity_filter (for UI hints only)
-# - builder(name, uid, params, entities)->cfg
-
+# Template catalog
 TEMPLATE_CATALOG: Dict[str, Dict[str, Any]] = {}
 
 def add_template(key: str, spec: Dict[str, Any]):
@@ -323,17 +254,14 @@ def basic_binary(name: str, uid: str, state: str, icon: str = "", extra: Dict[st
         b.update(extra)
     return {"template": [{"binary_sensor": [b]}]}
 
-# ---- Add common templates ----
-
+# ---- common templates ----
 add_template("count_lights", {
     "title": "💡 Tel lampen aan",
     "kind": "sensor",
     "needs_entities": False,
     "params": [],
     "defaults": {"icon": "mdi:lightbulb-group"},
-    "suggestions": [
-        "Perfect voor dashboard: als > 0, dan heb je nog lampen aan staan.",
-    ],
+    "suggestions": ["Perfect voor dashboard: als > 0, dan heb je nog lampen aan staan."],
     "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -343,56 +271,13 @@ add_template("count_lights", {
     ),
 })
 
-add_template("count_domain_on", {
-    "title": "🔢 Tel apparaten aan (per domein)",
-    "kind": "sensor",
-    "needs_entities": False,
-    "params": [
-        {"key": "domain", "label": "Domein", "type": "select",
-         "options": ["light", "switch", "fan", "media_player", "climate"], "default": "light"}
-    ],
-    "defaults": {"icon": "mdi:counter"},
-    "suggestions": [
-        "Voor snelle checks: hoeveel switches staan nog aan?",
-    ],
-    "entity_filter": {"domains": []},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        f"{{{{ states.{p.get('domain','light')} | selectattr('state','eq','on') | list | count }}}}",
-        "mdi:counter",
-    ),
-})
-
-add_template("unavailable_count_domain", {
-    "title": "🚫 Aantal unavailable/unknown (per domein)",
-    "kind": "sensor",
-    "needs_entities": False,
-    "params": [
-        {"key": "domain", "label": "Domein", "type": "select",
-         "options": ["sensor", "light", "switch", "binary_sensor", "climate", "media_player"], "default": "sensor"}
-    ],
-    "defaults": {"icon": "mdi:alert-circle"},
-    "suggestions": [
-        "Handig om integratieproblemen snel te zien.",
-    ],
-    "entity_filter": {"domains": []},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        build_unavailable_count(p.get("domain", "sensor")),
-        "mdi:alert-circle",
-    ),
-})
-
 add_template("sum_power", {
     "title": "⚡ Som: totaal vermogen (W)",
     "kind": "sensor",
     "needs_entities": True,
     "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}],
     "defaults": {"icon": "mdi:flash"},
-    "suggestions": [
-        "Selecteer sensoren met W (device_class power).",
-        "Unknown/unavailable wordt automatisch genegeerd.",
-    ],
+    "suggestions": ["Selecteer sensoren met W (power). Unknown/unavailable wordt genegeerd."],
     "entity_filter": {"domains": ["sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -408,10 +293,7 @@ add_template("sum_energy", {
     "needs_entities": True,
     "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 3}],
     "defaults": {"icon": "mdi:transmission-tower"},
-    "suggestions": [
-        "Selecteer sensoren met kWh (device_class energy).",
-        "Voor Energy dashboard: vaak state_class total_increasing.",
-    ],
+    "suggestions": ["Selecteer energy sensoren (kWh). Voor Energy dashboard: state_class total_increasing."],
     "entity_filter": {"domains": ["sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -427,9 +309,7 @@ add_template("average_temp", {
     "needs_entities": True,
     "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 1}],
     "defaults": {"icon": "mdi:thermometer"},
-    "suggestions": [
-        "Selecteer temperatuur sensoren.",
-    ],
+    "suggestions": ["Selecteer temperatuur sensoren."],
     "entity_filter": {"domains": ["sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -439,91 +319,19 @@ add_template("average_temp", {
     ),
 })
 
-add_template("average_humidity", {
-    "title": "💧 Gemiddelde luchtvochtigheid (%)",
-    "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 0}],
-    "defaults": {"icon": "mdi:water-percent"},
-    "suggestions": [
-        "Selecteer humidity sensoren (%).",
-    ],
-    "entity_filter": {"domains": ["sensor"]},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | average | round(" + str(int(p.get("round", 0))) + ") }}",
-        "mdi:water-percent",
-        {"unit_of_measurement": "%", "device_class": "humidity"}
-    ),
-})
-
-add_template("min_value", {
-    "title": "⬇️ Minimum waarde (uit selectie)",
-    "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}],
-    "defaults": {"icon": "mdi:arrow-down-bold"},
-    "suggestions": [
-        "Handig voor laagste temp/vochtigheid in huis.",
-    ],
-    "entity_filter": {"domains": ["sensor"]},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | list | min) | round(" + str(int(p.get("round", 2))) + ") }}",
-        "mdi:arrow-down-bold"
-    ),
-})
-
-add_template("max_value", {
-    "title": "⬆️ Maximum waarde (uit selectie)",
-    "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}],
-    "defaults": {"icon": "mdi:arrow-up-bold"},
-    "suggestions": [
-        "Handig voor hoogste power/temp.",
-    ],
-    "entity_filter": {"domains": ["sensor"]},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | list | max) | round(" + str(int(p.get("round", 2))) + ") }}",
-        "mdi:arrow-up-bold"
-    ),
-})
-
 add_template("any_open", {
     "title": "🚪 Iets open? (binary sensor)",
     "kind": "binary_sensor",
     "needs_entities": True,
     "params": [],
     "defaults": {"icon": "mdi:door-open"},
-    "suggestions": [
-        "Selecteer deur/raam binary_sensors.",
-        "True als één van de selectie 'on' of 'open' is."
-    ],
+    "suggestions": ["Selecteer deur/raam binary_sensors. True als één 'on' of 'open' is."],
     "entity_filter": {"domains": ["binary_sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_binary(
         name, uid,
         "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | select('in',['on','open']) | list | count) > 0 }}",
         "mdi:door-open",
         {"device_class": "door"}
-    ),
-})
-
-add_template("all_off", {
-    "title": "⛔ Alles uit? (binary sensor)",
-    "kind": "binary_sensor",
-    "needs_entities": True,
-    "params": [{"key": "on_state", "label": "Wat is 'aan' state?", "type": "text", "default": "on"}],
-    "defaults": {"icon": "mdi:power"},
-    "suggestions": [
-        "Selecteer lights/switches; true als alles NIET 'on' is."
-    ],
-    "entity_filter": {"domains": ["light", "switch"]},
-    "builder": lambda name, uid, p, entities=None: basic_binary(
-        name, uid,
-        "{{ (" + entities_to_jinja_list(entities or []) + f" | map('states') | select('eq','{p.get('on_state','on')}') | list | count) == 0 }}",
-        "mdi:power"
     ),
 })
 
@@ -536,10 +344,7 @@ add_template("threshold_above", {
         {"key": "mode", "label": "Mode", "type": "select", "options": ["any", "all"], "default": "any"}
     ],
     "defaults": {"icon": "mdi:alert"},
-    "suggestions": [
-        "Gebruik voor power > 2000W, humidity > 60%, etc.",
-        "Mode any: één boven threshold = true. Mode all: allemaal boven threshold = true."
-    ],
+    "suggestions": ["Power > 2000W, humidity > 60%, etc. any/all bepaalt of 1 genoeg is of allemaal."],
     "entity_filter": {"domains": ["sensor"]},
     "builder": lambda name, uid, p, entities=None: basic_binary(
         name, uid,
@@ -548,59 +353,19 @@ add_template("threshold_above", {
     ),
 })
 
-add_template("any_home", {
-    "title": "🏠 Iemand thuis? (person/device_tracker)",
-    "kind": "binary_sensor",
-    "needs_entities": True,
-    "params": [{"key": "home_state", "label": "Home state", "type": "text", "default": "home"}],
-    "defaults": {"icon": "mdi:home-account"},
-    "suggestions": [
-        "Selecteer persons of device_trackers. True als iemand 'home' is."
-    ],
-    "entity_filter": {"domains": ["person", "device_tracker"]},
-    "builder": lambda name, uid, p, entities=None: basic_binary(
-        name, uid,
-        build_any_state_match(entities or [], [p.get("home_state", "home")]),
-        "mdi:home-account",
-        {"device_class": "presence"}
-    ),
-})
-
-add_template("count_home", {
-    "title": "👥 Aantal personen thuis",
+add_template("unavailable_count_domain", {
+    "title": "🚫 Aantal unavailable/unknown (per domein)",
     "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "home_state", "label": "Home state", "type": "text", "default": "home"}],
-    "defaults": {"icon": "mdi:account-group"},
-    "suggestions": [
-        "Selecteer persons/device_trackers en tel hoeveel er 'home' zijn."
-    ],
-    "entity_filter": {"domains": ["person", "device_tracker"]},
+    "needs_entities": False,
+    "params": [{"key": "domain", "label": "Domein", "type": "select",
+                "options": ["sensor", "light", "switch", "binary_sensor", "climate", "media_player"], "default": "sensor"}],
+    "defaults": {"icon": "mdi:alert-circle"},
+    "suggestions": ["Handig om integratieproblemen snel te zien."],
+    "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
-        "{{ " + entities_to_jinja_list(entities or []) + f" | map('states') | select('eq','{p.get('home_state','home')}') | list | count }}",
-        "mdi:account-group",
-        {"unit_of_measurement": "personen"}
-    ),
-})
-
-add_template("climate_any_heating", {
-    "title": "🔥 Verwarming actief? (climate hvac_action/heating)",
-    "kind": "binary_sensor",
-    "needs_entities": True,
-    "params": [{"key": "action", "label": "hvac_action state", "type": "text", "default": "heating"}],
-    "defaults": {"icon": "mdi:fire"},
-    "suggestions": [
-        "Selecteer climate entities. True als hvac_action == heating (of jouw gekozen value)."
-    ],
-    "entity_filter": {"domains": ["climate"]},
-    "builder": lambda name, uid, p, entities=None: basic_binary(
-        name, uid,
-        "{% set ents = " + entities_to_jinja_list(entities or []) + " %}"
-        "{% set a = '" + str(p.get("action", "heating")) + "' %}"
-        "{{ ents | select('in', states.climate | map(attribute='entity_id') | list) | list | length > 0 and "
-        "(ents | map('state_attr','hvac_action') | select('eq', a) | list | count) > 0 }}",
-        "mdi:fire"
+        build_unavailable_count(p.get("domain", "sensor")),
+        "mdi:alert-circle"
     ),
 })
 
@@ -610,10 +375,7 @@ add_template("last_changed_human", {
     "needs_entities": True,
     "params": [],
     "defaults": {"icon": "mdi:clock-outline"},
-    "suggestions": [
-        "Selecteer precies 1 entity.",
-        "Handig om te zien wanneer iets laatst veranderde."
-    ],
+    "suggestions": ["Selecteer precies 1 entity."],
     "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -628,9 +390,7 @@ add_template("age_minutes", {
     "needs_entities": True,
     "params": [],
     "defaults": {"icon": "mdi:timer-outline"},
-    "suggestions": [
-        "Selecteer precies 1 entity. Output is minuten sinds last_changed."
-    ],
+    "suggestions": ["Selecteer precies 1 entity."],
     "entity_filter": {"domains": []},
     "builder": lambda name, uid, p, entities=None: basic_sensor(
         name, uid,
@@ -639,48 +399,6 @@ add_template("age_minutes", {
         {"unit_of_measurement": "min"}
     ),
 })
-
-add_template("list_on_entities", {
-    "title": "🧾 Lijst: welke entities zijn aan? (tekst)",
-    "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "max_items", "label": "Max items", "type": "int", "default": 10}],
-    "defaults": {"icon": "mdi:format-list-bulleted"},
-    "suggestions": [
-        "Super voor troubleshooting: 'welke lampen staan nog aan?'",
-        "Zet max_items laag voor nette UI."
-    ],
-    "entity_filter": {"domains": ["light", "switch"]},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        "{% set ents = " + entities_to_jinja_list(entities or []) + " %}"
-        "{% set on = [] %}"
-        "{% for e in ents %}{% if states(e) == 'on' %}{% set on = on + [e] %}{% endif %}{% endfor %}"
-        "{{ (on[:"
-        + str(int(p.get("max_items", 10)))
-        + "] | map('replace','light.','') | map('replace','switch.','') | list) | join(', ') }}",
-        "mdi:format-list-bulleted"
-    ),
-})
-
-add_template("battery_min", {
-    "title": "🔋 Laagste batterij (%)",
-    "kind": "sensor",
-    "needs_entities": True,
-    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 0}],
-    "defaults": {"icon": "mdi:battery-alert"},
-    "suggestions": [
-        "Selecteer batterij sensoren (%)."
-    ],
-    "entity_filter": {"domains": ["sensor"]},
-    "builder": lambda name, uid, p, entities=None: basic_sensor(
-        name, uid,
-        "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | list | min) | round(" + str(int(p.get("round", 0))) + ") }}",
-        "mdi:battery-alert",
-        {"unit_of_measurement": "%"}
-    ),
-})
-
 
 # -------------------------
 # Building logic
@@ -700,21 +418,16 @@ def build_template_config(
     spec = TEMPLATE_CATALOG[template_type]
     uid = f"template_{safe_name}"
 
-    # sanitize entities
     entities = [e for e in (entities or []) if sanitize_entity_id(e)]
 
     if spec.get("needs_entities"):
         if not entities:
             return None, "Deze template heeft een selectie van entities nodig."
-        # some templates require exactly 1 entity
         if template_type in ("last_changed_human", "age_minutes") and len(entities) != 1:
             return None, "Selecteer precies 1 entity voor dit template type."
 
-    # Build
-    builder = spec["builder"]
-    cfg = builder(name, uid, params, entities=entities)
+    cfg = spec["builder"](name, uid, params, entities=entities)
 
-    # Override icon if user set one
     if icon:
         try:
             block = cfg["template"][0]
@@ -739,9 +452,6 @@ def extract_first_state_template(cfg: dict) -> Optional[str]:
     return None
 
 def extract_entity_info(cfg: dict) -> Tuple[str, str]:
-    """
-    returns (kind, unique_id) from first entity.
-    """
     try:
         block = cfg["template"][0]
         if "sensor" in block and block["sensor"]:
@@ -753,44 +463,27 @@ def extract_entity_info(cfg: dict) -> Tuple[str, str]:
     return ("", "")
 
 def build_automation_snippet(entity_name: str, unique_id: str, kind: str, trigger_mode: str, threshold: Optional[float] = None) -> dict:
-    """
-    Generate a basic automation YAML snippet.
-    - kind: sensor/binary_sensor
-    - trigger_mode: state / numeric_state
-    """
     alias = f"Reageer op {entity_name}"
+    guessed_entity_id = f"{kind}.{unique_id.replace('template_', '')}"
+
     if trigger_mode == "numeric_state":
-        # Numeric threshold
         th = 0 if threshold is None else threshold
         return {
             "alias": alias,
             "mode": "single",
-            "trigger": [{
-                "platform": "numeric_state",
-                "entity_id": f"{kind}.{unique_id.replace('template_', '')}",  # best-effort guess (user may need to adjust)
-                "above": th
-            }],
-            "action": [{
-                "service": "persistent_notification.create",
-                "data": {"title": "Template Maker", "message": f"{entity_name} is boven {th}!"}
-            }]
+            "trigger": [{"platform": "numeric_state", "entity_id": guessed_entity_id, "above": th}],
+            "action": [{"service": "persistent_notification.create", "data": {"title": "Template Maker", "message": f"{entity_name} is boven {th}!"}}]
         }
-    # default: state trigger
+
     return {
         "alias": alias,
         "mode": "single",
-        "trigger": [{
-            "platform": "state",
-            "entity_id": f"{kind}.{unique_id.replace('template_', '')}",
-        }],
-        "action": [{
-            "service": "persistent_notification.create",
-            "data": {"title": "Template Maker", "message": f"{entity_name} veranderde van state."}
-        }]
+        "trigger": [{"platform": "state", "entity_id": guessed_entity_id}],
+        "action": [{"service": "persistent_notification.create", "data": {"title": "Template Maker", "message": f"{entity_name} veranderde van state."}}]
     }
 
 # -------------------------
-# Routes
+# UI
 # -------------------------
 
 @app.route("/")
@@ -828,14 +521,14 @@ def index():
           <div class="flex-shrink-0">⚠️</div>
           <div class="ml-3">
             <p class="text-sm text-yellow-700">
-              <strong>Token ontbreekt!</strong> Je kunt wel YAML genereren, maar <strong>testen/reload</strong> werkt pas met token.
+              <strong>Geen token in container!</strong><br>
+              Genereren/opslaan werkt, maar <strong>testen/reload</strong> kan pas als je add-on correct SUPERVISOR_TOKEN krijgt.
             </p>
           </div>
         </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <!-- LEFT -->
         <div>
           <div class="mb-4">
             <label class="block text-lg font-semibold text-gray-700 mb-2">📝 Naam</label>
@@ -946,45 +639,34 @@ def index():
           </div>
         </div>
 
-        <!-- RIGHT -->
         <div>
-          <div id="preview" class="bg-gray-50 p-6 rounded-xl border border-gray-200">
+          <div class="bg-gray-50 p-6 rounded-xl border border-gray-200">
             <div class="flex items-center justify-between mb-3">
               <h3 class="text-xl font-bold text-gray-800">🧾 YAML</h3>
               <div class="flex gap-2">
                 <button onclick="copyYaml()"
-                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-                  📋 Copy
-                </button>
+                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">📋 Copy</button>
                 <button onclick="copyAutomation()"
-                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-                  📋 Copy automation
-                </button>
+                        class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">📋 Copy automation</button>
               </div>
             </div>
             <pre id="previewCode" class="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[260px]"></pre>
           </div>
 
-          <div id="testBox" class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
+          <div class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
             <div class="flex items-center justify-between mb-2">
               <h3 class="text-xl font-bold text-gray-800">🧪 Test output</h3>
               <span id="testBadge" class="text-xs px-2 py-1 rounded bg-gray-200 text-gray-700">Nog niet getest</span>
             </div>
             <pre id="testResult" class="bg-gray-50 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[120px] text-gray-800"></pre>
-            <p class="text-xs text-gray-500 mt-2">
-              Test gebruikt Home Assistant <code>/api/template</code> en toont direct de output.
-            </p>
           </div>
 
-          <div id="automationBox" class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
+          <div class="mt-4 bg-white p-6 rounded-xl border border-gray-200">
             <div class="flex items-center justify-between mb-2">
               <h3 class="text-xl font-bold text-gray-800">🤖 Automation snippet</h3>
               <span class="text-xs px-2 py-1 rounded bg-gray-200 text-gray-700">Best-effort</span>
             </div>
             <pre id="automationCode" class="bg-gray-50 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[120px] text-gray-800"></pre>
-            <p class="text-xs text-gray-500 mt-2">
-              Snippet is een startpunt. Entity_id kan je nog even aanpassen in HA.
-            </p>
           </div>
         </div>
       </div>
@@ -1000,7 +682,6 @@ def index():
   let entities = [];
   let catalog = {{}};
   let selectedEntities = [];
-  let lastAutomationYaml = '';
 
   const API_BASE = window.location.pathname.replace(/\\/$/, '');
 
@@ -1017,89 +698,36 @@ def index():
   async function init() {{
     setStatus('Verbinden...', 'yellow');
 
-    try {{
-      const cfgRes = await fetch(API_BASE + '/api/config');
-      const cfg = await cfgRes.json();
-      if (!cfg.token_configured) document.getElementById('tokenWarning').classList.remove('hidden');
+    const cfgRes = await fetch(API_BASE + '/api/config');
+    const cfg = await cfgRes.json();
+    if (!cfg.token_configured) document.getElementById('tokenWarning').classList.remove('hidden');
 
-      const catRes = await fetch(API_BASE + '/api/catalog');
-      catalog = await catRes.json();
+    const catRes = await fetch(API_BASE + '/api/catalog');
+    catalog = await catRes.json();
 
-      const typeSelect = document.getElementById('templateType');
-      Object.keys(catalog).forEach(key => {{
-        const opt = document.createElement('option');
-        opt.value = key;
-        opt.textContent = catalog[key].title;
-        typeSelect.appendChild(opt);
-      }});
-
-      const entRes = await fetch(API_BASE + '/api/entities');
-      entities = await entRes.json();
-
-      setStatus('Verbonden (' + entities.length + ' entities)', 'green');
-      document.getElementById('previewCode').textContent = '# Kies een type en klik Preview.';
-      document.getElementById('testResult').textContent = '—';
-      document.getElementById('automationCode').textContent = '—';
-    }} catch (e) {{
-      console.error(e);
-      setStatus('Verbinding mislukt', 'red');
-    }}
-  }}
-
-  function clearSelections() {{
-    selectedEntities = [];
-    renderSelectedChips();
-    document.querySelectorAll('.entity-select').forEach(el => {{
-      el.classList.remove('bg-purple-100','border-purple-500');
-      el.classList.add('border-gray-200');
+    const typeSelect = document.getElementById('templateType');
+    Object.keys(catalog).forEach(key => {{
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = catalog[key].title;
+      typeSelect.appendChild(opt);
     }});
-  }}
 
-  function toggleEntity(el, entityId) {{
-    const i = selectedEntities.indexOf(entityId);
-    if (i > -1) {{
-      selectedEntities.splice(i, 1);
-      el.classList.remove('bg-purple-100','border-purple-500');
-      el.classList.add('border-gray-200');
-    }} else {{
-      selectedEntities.push(entityId);
-      el.classList.add('bg-purple-100','border-purple-500');
-      el.classList.remove('border-gray-200');
-    }}
-    renderSelectedChips();
-  }}
+    const entRes = await fetch(API_BASE + '/api/entities');
+    entities = await entRes.json();
 
-  function renderSelectedChips() {{
-    const box = document.getElementById('selectedChips');
-    box.innerHTML = '';
-    selectedEntities.slice(0, 50).forEach(eid => {{
-      const chip = document.createElement('div');
-      chip.className = 'text-xs bg-purple-100 border border-purple-200 text-purple-900 px-2 py-1 rounded-full flex items-center gap-2';
-      chip.innerHTML = '<span class="font-mono">' + escapeHtml(eid) + '</span>' +
-                       '<button class="text-purple-700 hover:text-purple-900" title="remove">✕</button>';
-      chip.querySelector('button').onclick = () => {{
-        selectedEntities = selectedEntities.filter(x => x !== eid);
-        renderEntities();
-        renderSelectedChips();
-      }};
-      box.appendChild(chip);
-    }});
-    if (selectedEntities.length > 50) {{
-      const more = document.createElement('div');
-      more.className = 'text-xs text-gray-500';
-      more.textContent = '... +' + (selectedEntities.length - 50) + ' meer';
-      box.appendChild(more);
-    }}
+    setStatus('Verbonden (' + entities.length + ' entities)', 'green');
+    document.getElementById('previewCode').textContent = '# Kies een type en klik Preview.';
+    document.getElementById('testResult').textContent = '—';
+    document.getElementById('automationCode').textContent = '—';
   }}
 
   function renderSuggestions(typeKey) {{
     const box = document.getElementById('suggestionsBox');
     const list = document.getElementById('suggestionsList');
     list.innerHTML = '';
-
     const s = (catalog[typeKey] && catalog[typeKey].suggestions) || [];
     if (!s.length) {{ box.classList.add('hidden'); return; }}
-
     s.forEach(item => {{
       const li = document.createElement('li');
       li.textContent = item;
@@ -1112,7 +740,6 @@ def index():
     const box = document.getElementById('paramsBox');
     const fields = document.getElementById('paramsFields');
     fields.innerHTML = '';
-
     const params = (catalog[typeKey] && catalog[typeKey].params) || [];
     if (!params.length) {{ box.classList.add('hidden'); return; }}
 
@@ -1150,6 +777,23 @@ def index():
     box.classList.remove('hidden');
   }}
 
+  function renderSelectedChips() {{
+    const box = document.getElementById('selectedChips');
+    box.innerHTML = '';
+    selectedEntities.slice(0, 50).forEach(eid => {{
+      const chip = document.createElement('div');
+      chip.className = 'text-xs bg-purple-100 border border-purple-200 text-purple-900 px-2 py-1 rounded-full flex items-center gap-2';
+      chip.innerHTML = '<span class="font-mono">' + escapeHtml(eid) + '</span>' +
+                       '<button class="text-purple-700 hover:text-purple-900" title="remove">✕</button>';
+      chip.querySelector('button').onclick = () => {{
+        selectedEntities = selectedEntities.filter(x => x !== eid);
+        renderEntities();
+        renderSelectedChips();
+      }};
+      box.appendChild(chip);
+    }});
+  }}
+
   function renderEntities() {{
     const typeKey = document.getElementById('templateType').value;
     const needs = catalog[typeKey] && catalog[typeKey].needs_entities;
@@ -1157,25 +801,18 @@ def index():
     const box = document.getElementById('entitiesBox');
     const list = document.getElementById('entity-list');
     const hint = document.getElementById('entitiesHint');
-
     list.innerHTML = '';
 
-    if (!needs) {{
-      box.classList.add('hidden');
-      return;
-    }}
+    if (!needs) {{ box.classList.add('hidden'); return; }}
 
-    // hint
-    hint.textContent = (typeKey === 'last_changed_human' || typeKey === 'age_minutes') ? 'Selecteer precies 1 entity.' : 'Selecteer 1 of meer entities.';
+    hint.textContent = (typeKey === 'last_changed_human' || typeKey === 'age_minutes')
+      ? 'Selecteer precies 1 entity.'
+      : 'Selecteer 1 of meer entities.';
 
-    // UI filter hint
     let filtered = entities;
     const domains = (catalog[typeKey] && catalog[typeKey].entity_filter && catalog[typeKey].entity_filter.domains) || [];
-    if (domains.length) {{
-      filtered = filtered.filter(e => domains.includes(e.domain));
-    }}
+    if (domains.length) filtered = filtered.filter(e => domains.includes(e.domain));
 
-    // search
     const q = (document.getElementById('entitySearch').value || '').toLowerCase().trim();
     if (q) {{
       filtered = filtered.filter(e => (String(e.name||'').toLowerCase().includes(q) || String(e.entity_id||'').toLowerCase().includes(q)));
@@ -1204,17 +841,29 @@ def index():
     renderSuggestions(typeKey);
     renderParams(typeKey);
 
-    // set default icon if empty
     const iconInput = document.getElementById('templateIcon');
     if ((!iconInput.value || !iconInput.value.trim()) && catalog[typeKey] && catalog[typeKey].defaults && catalog[typeKey].defaults.icon) {{
       iconInput.value = catalog[typeKey].defaults.icon;
     }}
 
-    // reset selection on type change
     selectedEntities = [];
     renderSelectedChips();
     document.getElementById('entitySearch').value = '';
     renderEntities();
+  }}
+
+  function toggleEntity(el, entityId) {{
+    const i = selectedEntities.indexOf(entityId);
+    if (i > -1) {{
+      selectedEntities.splice(i, 1);
+      el.classList.remove('bg-purple-100','border-purple-500');
+      el.classList.add('border-gray-200');
+    }} else {{
+      selectedEntities.push(entityId);
+      el.classList.add('bg-purple-100','border-purple-500');
+      el.classList.remove('border-gray-200');
+    }}
+    renderSelectedChips();
   }}
 
   function collectParams(typeKey) {{
@@ -1250,9 +899,7 @@ def index():
     if (!p.type) return alert('❌ Kies een template type!');
 
     const res = await fetch(API_BASE + '/api/preview_template', {{
-      method: 'POST',
-      headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify(p)
+      method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify(p)
     }});
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
@@ -1265,13 +912,10 @@ def index():
     if (!p.type) return alert('❌ Kies een template type!');
 
     const res = await fetch(API_BASE + '/api/create_template', {{
-      method: 'POST',
-      headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify(p)
+      method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify(p)
     }});
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
-
     document.getElementById('previewCode').textContent = data.code;
     alert('✅ Opgeslagen als ' + data.filename + '\\n\\nTip: Reload Template Entities in HA.');
   }}
@@ -1282,9 +926,7 @@ def index():
     if (!p.type) return alert('❌ Kies een template type!');
 
     const res = await fetch(API_BASE + '/api/test_template', {{
-      method: 'POST',
-      headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify(p)
+      method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify(p)
     }});
     const data = await res.json();
 
@@ -1309,9 +951,7 @@ def index():
     if (!p.type) return alert('❌ Kies een template type!');
 
     const res = await fetch(API_BASE + '/api/yaml_check', {{
-      method: 'POST',
-      headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify(p)
+      method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify(p)
     }});
     const data = await res.json();
 
@@ -1334,43 +974,39 @@ def index():
     const res = await fetch(API_BASE + '/api/reload_templates', {{ method: 'POST' }});
     const data = await res.json();
     if (!res.ok || !data.ok) {{
-      return alert('❌ Reload failed: ' + (data.error || 'Onbekend') + (data.details ? ('\\n\\n' + data.details) : ''));
+      return alert('❌ Reload failed: ' + (data.error || 'Onbekend') + (data.details ? ('\\n\\n' + JSON.stringify(data.details)) : ''));
     }}
-    alert('✅ Reload request verstuurd naar Home Assistant.\\n' + (data.result || 'OK'));
+    alert('✅ Reload request verstuurd: ' + (data.result || 'OK'));
   }}
 
   async function loadTemplates() {{
-    try {{
-      const response = await fetch(API_BASE + '/api/templates');
-      const templates = await response.json();
+    const response = await fetch(API_BASE + '/api/templates');
+    const templates = await response.json();
 
-      const list = document.getElementById('templatesList');
-      const content = document.getElementById('templatesContent');
+    const list = document.getElementById('templatesList');
+    const content = document.getElementById('templatesContent');
 
-      if (!templates.length) {{
-        list.classList.add('hidden');
-        return alert('Nog geen templates aangemaakt!');
-      }}
-
-      list.classList.remove('hidden');
-
-      let html = '';
-      templates.forEach(t => {{
-        html += '<div class="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
-        html += '<div><div class="font-semibold">' + escapeHtml(t.name) + '</div>';
-        html += '<div class="text-sm text-gray-500 font-mono">' + escapeHtml(t.filename) + '</div></div>';
-        html += '<div class="flex gap-2 flex-wrap">';
-        html += '<button onclick="openTemplate(\\'' + t.filename + '\\')" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">📄 Open</button>';
-        html += '<button onclick="downloadExisting(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
-        html += '<button onclick="deleteTemplate(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
-        html += '</div></div>';
-      }});
-
-      content.innerHTML = html;
-      list.scrollIntoView({{ behavior: 'smooth' }});
-    }} catch (error) {{
-      alert('Kon templates niet laden: ' + error.message);
+    if (!templates.length) {{
+      list.classList.add('hidden');
+      return alert('Nog geen templates aangemaakt!');
     }}
+
+    list.classList.remove('hidden');
+
+    let html = '';
+    templates.forEach(t => {{
+      html += '<div class="bg-gray-50 border-2 border-gray-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
+      html += '<div><div class="font-semibold">' + escapeHtml(t.name) + '</div>';
+      html += '<div class="text-sm text-gray-500 font-mono">' + escapeHtml(t.filename) + '</div></div>';
+      html += '<div class="flex gap-2 flex-wrap">';
+      html += '<button onclick="openTemplate(\\'' + t.filename + '\\')" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">📄 Open</button>';
+      html += '<button onclick="downloadExisting(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
+      html += '<button onclick="deleteTemplate(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
+      html += '</div></div>';
+    }});
+
+    content.innerHTML = html;
+    list.scrollIntoView({{ behavior: 'smooth' }});
   }}
 
   async function openTemplate(filename) {{
@@ -1383,15 +1019,10 @@ def index():
 
   async function deleteTemplate(filename) {{
     if (!confirm('Weet je zeker dat je ' + filename + ' wilt verwijderen?')) return;
-
     const response = await fetch(API_BASE + '/api/delete_template', {{
-      method: 'POST',
-      headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ filename }})
+      method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ filename }})
     }});
-
     const result = await response.json();
-
     if (response.ok) {{
       alert('✅ Template verwijderd!');
       loadTemplates();
@@ -1403,12 +1034,6 @@ def index():
   function copyYaml() {{
     const text = document.getElementById('previewCode').textContent || '';
     navigator.clipboard.writeText(text).then(() => alert('📋 YAML gekopieerd!'));
-  }}
-
-  function copyAutomation() {{
-    const text = document.getElementById('automationCode').textContent || '';
-    if (!text || text === '—') return alert('Nog geen automation snippet.');
-    navigator.clipboard.writeText(text).then(() => alert('📋 Automation gekopieerd!'));
   }}
 
   async function downloadYaml() {{
@@ -1432,9 +1057,7 @@ def index():
     const cards = list.querySelectorAll('.entity-select');
     cards.forEach(card => {{
       const eid = card.querySelector('.font-mono')?.textContent || '';
-      if (eid && !selectedEntities.includes(eid)) {{
-        selectedEntities.push(eid);
-      }}
+      if (eid && !selectedEntities.includes(eid)) selectedEntities.push(eid);
     }});
     renderEntities();
     renderSelectedChips();
@@ -1451,14 +1074,11 @@ def index():
     if (!p.name) return alert('❌ Vul een naam in!');
     if (!p.type) return alert('❌ Kies een template type!');
     const res = await fetch(API_BASE + '/api/automation_snippet', {{
-      method: 'POST',
-      headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify(p)
+      method: 'POST', headers: {{'Content-Type':'application/json'}}, body: JSON.stringify(p)
     }});
     const data = await res.json();
     if (!res.ok) return alert('❌ ' + (data.error || 'Onbekende fout'));
     document.getElementById('automationCode').textContent = data.code || '—';
-    lastAutomationYaml = data.code || '';
   }}
 
   init();
@@ -1467,6 +1087,9 @@ def index():
 </html>"""
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
+# -------------------------
+# API routes
+# -------------------------
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
@@ -1475,9 +1098,13 @@ def get_config():
         "app_version": APP_VERSION,
         "token_configured": bool(SUPERVISOR_TOKEN),
         "templates_path": TEMPLATES_PATH,
-        "server_time": datetime.now().isoformat(timespec="seconds")
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+        "token_debug": {
+            "env_SUPERVISOR_TOKEN": bool((os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()),
+            "env_HOMEASSISTANT_TOKEN": bool((os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()),
+            "file_supervisor_token": bool(_read_file("/var/run/supervisor_token")),
+        }
     })
-
 
 @app.route("/api/catalog", methods=["GET"])
 def get_catalog():
@@ -1494,41 +1121,49 @@ def get_catalog():
         }
     return jsonify(meta)
 
-
 @app.route("/api/entities", methods=["GET"])
 def api_entities():
-    return jsonify(get_ha_entities())
+    # If no token, return helpful minimal demo so UI still works
+    if not SUPERVISOR_TOKEN:
+        return jsonify([
+            {"entity_id": "light.woonkamer", "domain": "light", "name": "Woonkamer Lamp"},
+            {"entity_id": "sensor.temp_woonkamer", "domain": "sensor", "name": "Temp Woonkamer"},
+            {"entity_id": "binary_sensor.deur_voordeur", "domain": "binary_sensor", "name": "Voordeur"},
+        ])
 
+    states, err, status = ha_get_states()
+    if err:
+        # still return empty but include log in console
+        print(f"Entities error: {err} ({status})")
+        return jsonify([])
+
+    entities = []
+    for s in states or []:
+        entity_id = s.get("entity_id", "")
+        if not entity_id:
+            continue
+        domain = entity_id.split(".")[0] if "." in entity_id else ""
+        attrs = s.get("attributes") or {}
+        friendly = attrs.get("friendly_name", entity_id)
+        entities.append({"entity_id": entity_id, "domain": domain, "name": friendly})
+    return jsonify(entities)
 
 @app.route("/api/templates", methods=["GET"])
 def api_templates():
     files = list_yaml_files(TEMPLATES_PATH)
-    out = []
-    for fn in files:
-        out.append({
-            "filename": fn,
-            "name": fn.replace(".yaml", "").replace("_", " ").title()
-        })
-    return jsonify(out)
-
+    return jsonify([{"filename": fn, "name": fn.replace(".yaml", "").replace("_", " ").title()} for fn in files])
 
 @app.route("/api/template", methods=["GET"])
 def read_template():
     filename = (request.args.get("filename", "") or "").strip()
     if not is_safe_filename(filename):
         return jsonify({"error": "Ongeldige filename"}), 400
-
     filepath = os.path.join(TEMPLATES_PATH, filename)
     if not os.path.exists(filepath):
         return jsonify({"error": "Bestand niet gevonden"}), 404
-
-    try:
-        content = read_text_file(filepath)
-        name_guess = filename.replace(".yaml", "").replace("_", " ").title()
-        return jsonify({"filename": filename, "code": content, "name_guess": name_guess})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+    content = read_text_file(filepath)
+    name_guess = filename.replace(".yaml", "").replace("_", " ").title()
+    return jsonify({"filename": filename, "code": content, "name_guess": name_guess})
 
 @app.route("/api/download", methods=["GET"])
 def download_template():
@@ -1539,11 +1174,8 @@ def download_template():
     if not os.path.exists(filepath):
         return jsonify({"error": "Bestand niet gevonden"}), 404
     content = read_text_file(filepath)
-    return Response(
-        content,
-        mimetype="text/yaml",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+    return Response(content, mimetype="text/yaml",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 @app.route("/api/preview_template", methods=["POST"])
@@ -1562,7 +1194,6 @@ def preview_template():
 
     code = safe_yaml_dump(cfg)
     return jsonify({"ok": True, "code": code})
-
 
 @app.route("/api/create_template", methods=["POST"])
 def create_template():
@@ -1588,24 +1219,20 @@ def create_template():
         filename = "template_maker.yaml"
         filepath = os.path.join(TEMPLATES_PATH, filename)
 
-        # append or overwrite section
         header = f"\n# ---- {name} ({template_type}) ----\n"
         if not os.path.exists(filepath):
             write_text_file(filepath, "# Generated by Template Maker Pro\n")
+
         existing = read_text_file(filepath)
 
-        # If overwrite checked: remove previous block with same header best-effort
         if overwrite:
             pattern = re.compile(rf"(?ms)^# ---- {re.escape(name)} \({re.escape(template_type)}\) ----\n.*?(?=^# ---- |\Z)")
-            existing2, n = pattern.subn("", existing)
-            existing = existing2
+            existing = pattern.sub("", existing)
 
-        # Append
         combined = existing.rstrip() + "\n" + header + code.strip() + "\n"
         write_text_file(filepath, combined)
         return jsonify({"success": True, "filename": filename, "code": combined, "message": f"Toegevoegd aan {filename}"})
 
-    # per-file mode
     desired = f"{safe_name}.yaml"
     filepath = os.path.join(TEMPLATES_PATH, desired)
 
@@ -1619,20 +1246,17 @@ def create_template():
     write_text_file(filepath, code)
     return jsonify({"success": True, "filename": desired, "code": code, "message": f"Template opgeslagen als {desired}"})
 
-
 @app.route("/api/delete_template", methods=["POST"])
 def delete_template():
     data = request.json or {}
     filename = (data.get("filename") or "").strip()
     if not is_safe_filename(filename):
         return jsonify({"error": "Ongeldige filename"}), 400
-
     filepath = os.path.join(TEMPLATES_PATH, filename)
     if os.path.exists(filepath):
         os.remove(filepath)
         return jsonify({"success": True, "message": f"{filename} verwijderd"})
     return jsonify({"error": "Bestand niet gevonden"}), 404
-
 
 @app.route("/api/test_template", methods=["POST"])
 def test_template():
@@ -1655,7 +1279,6 @@ def test_template():
     result, status = ha_template_render(st, variables={})
     return jsonify(result), status
 
-
 @app.route("/api/yaml_check", methods=["POST"])
 def yaml_check():
     data = request.json or {}
@@ -1672,52 +1295,44 @@ def yaml_check():
 
     code = safe_yaml_dump(cfg)
 
-    # best-effort check
+    # local YAML parse
     try:
-        # local parse already in helper
-        # (we also return YAML itself so user can see it)
         yaml.safe_load(code)
     except Exception as e:
         return jsonify({"ok": False, "error": "YAML parse error", "details": str(e)}), 400
 
-    # If HA token exists, try some known endpoints; else accept parse OK
-    if not SUPERVISOR_TOKEN:
-        return jsonify({"ok": True, "result": "YAML parse OK (offline)."}), 200
-
-    # We keep it simple: just say parse ok + optionally do a template render on the state field too
+    # Optional Jinja render test
     st = extract_first_state_template(cfg)
-    if st:
+    if st and SUPERVISOR_TOKEN:
         r, _ = ha_template_render(st, variables={})
         if r.get("ok"):
             return jsonify({"ok": True, "result": "YAML parse OK + Jinja render OK."}), 200
-        return jsonify({"ok": False, "error": "Jinja render failed", "details": r.get("error")}), 400
+        return jsonify({"ok": False, "error": "Jinja render failed", "details": (r.get("error") or "") + ("\n" + r.get("details","") if r.get("details") else "")}), 400
+
+    if not SUPERVISOR_TOKEN:
+        return jsonify({"ok": True, "result": "YAML parse OK (offline)."}), 200
 
     return jsonify({"ok": True, "result": "YAML parse OK."}), 200
 
-
 @app.route("/api/reload_templates", methods=["POST"])
 def reload_templates():
-    """
-    Best-effort: HA service name differs per version.
-    We'll try a couple common options.
-    """
     if not SUPERVISOR_TOKEN:
-        return jsonify({"ok": False, "error": "Geen token; kan niet reloaden."}), 400
+        return jsonify({"ok": False, "error": "Geen token in container; kan niet reloaden."}), 400
 
+    # Most common in modern HA
     candidates = [
         ("template", "reload", {}),
-        ("homeassistant", "reload_core_config", {}),  # fallback (not template-specific)
+        ("homeassistant", "reload_core_config", {}),
     ]
 
-    last_error = None
+    last = None
     for domain, service, payload in candidates:
         r, status = ha_call_service(domain, service, payload)
         if status == 200 and r.get("ok"):
-            return jsonify({"ok": True, "result": f"Service call: {domain}.{service}"}), 200
-        last_error = r
+            return jsonify({"ok": True, "result": f"{domain}.{service}"}), 200
+        last = r
 
-    return jsonify({"ok": False, "error": "Geen werkende reload service gevonden.", "details": last_error}), 400
-
+    return jsonify({"ok": False, "error": "Geen werkende reload service gevonden.", "details": last}), 400
 
 @app.route("/api/automation_snippet", methods=["POST"])
 def automation_snippet():
@@ -1737,20 +1352,18 @@ def automation_snippet():
     if not kind or not uid:
         return jsonify({"error": "Kon unique_id/kind niet bepalen voor snippet."}), 400
 
-    # Decide trigger type: if it's a sensor and looks numeric, offer numeric_state; else state trigger
     trigger_mode = "state"
     threshold = None
-    if kind == "sensor":
-        # heuristic: if template_type is threshold-ish, suggest numeric_state
-        if template_type in ("sum_power", "sum_energy", "average_temp", "average_humidity", "min_value", "max_value", "battery_min"):
-            trigger_mode = "numeric_state"
-            threshold = 0
+    if kind == "sensor" and template_type in ("sum_power", "sum_energy", "average_temp"):
+        trigger_mode = "numeric_state"
+        threshold = 0
 
     snippet = build_automation_snippet(name, uid, kind, trigger_mode, threshold)
+    return jsonify({"ok": True, "code": safe_yaml_dump(snippet)})
 
-    code = safe_yaml_dump(snippet)
-    return jsonify({"ok": True, "code": code})
-
+# -------------------------
+# main
+# -------------------------
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)

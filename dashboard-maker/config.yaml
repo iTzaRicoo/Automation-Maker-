@@ -1,0 +1,29 @@
+name: "Dashboard Maker"
+version: "1.0.0"
+slug: "dashboard_maker"
+description: "Maak dashboards zonder YAML trauma - met visuele interface!"
+url: "https://github.com/JOUW-USERNAME/template-maker-pro"
+arch:
+  - armhf
+  - armv7
+  - aarch64
+  - amd64
+  - i386
+init: false
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "Web interface"
+webui: "http://[HOST]:[PORT:8099]"
+startup: application
+boot: auto
+hassio_api: true
+hassio_role: default
+homeassistant_api: true
+auth_api: true
+options:
+  supervisor_token: ""
+schema:
+  supervisor_token: password?
+map:
+  - config:rw

@@ -30,8 +30,10 @@ homeassistant_api: true
 auth_api: true
 
 options:
+  access_token: ""
   supervisor_token: ""
 schema:
+  access_token: password?
   supervisor_token: password?
 
 map:

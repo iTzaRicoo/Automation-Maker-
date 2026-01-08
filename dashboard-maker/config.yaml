@@ -1,41 +1,47 @@
 name: "Dashboard Maker"
-version: "1.0.9"
+version: "1.0.10"
 slug: "dashboard_maker"
-description: "Maak dashboards zonder YAML trauma - met visuele interface!"
-url: "https://github.com/JOUW-USERNAME/dashboard-maker"
+description: "0-kennis wizard die automatisch WOW dashboards maakt (Mushroom + theme + demo)"
 arch:
   - armhf
   - armv7
   - aarch64
   - amd64
   - i386
-
-startup: application
-boot: auto
 init: false
 
-# Ingress: geen vaste poort nodig
-ingress: true
-ingress_port: 8099
-panel_icon: mdi:view-dashboard
-panel_title: "Dashboard Maker"
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "Web interface"
 
-# Geen ports: voorkomt conflicts
-# ports:
-#   8099/tcp: 8099
+webui: "http://[HOST]:[PORT:8099]"
+startup: application
+boot: auto
 
 hassio_api: true
 hassio_role: default
 homeassistant_api: true
 auth_api: true
 
+ingress: true
+ingress_port: 8099
+
+panel_icon: mdi:view-dashboard-variant
+panel_title: Dashboard Maker
+
 options:
+  dashboards_path: "/config/dashboards"
   access_token: ""
   supervisor_token: ""
+  debug_mode: false
+
 schema:
-  access_token: password?
+  dashboards_path: str
+  access_token: password
   supervisor_token: password?
+  debug_mode: bool
 
 map:
   - config:rw
-
+  - share:rw

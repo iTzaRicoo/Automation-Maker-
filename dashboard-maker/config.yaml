@@ -1,5 +1,5 @@
 name: "Dashboard Maker"
-version: "1.0.12"
+version: "1.0.13"
 slug: "dashboard_maker"
 description: "0-kennis wizard die automatisch WOW dashboards maakt (Mushroom + theme + demo)"
 arch:

@@ -1,5 +1,5 @@
 name: "Template Maker"
-version: "1.0.4"
+version: "1.0.5"
 slug: "template_maker"
 description: "Maak templates zonder YAML trauma - met visuele interface!"
 url: "https://github.com/JOUW-USERNAME/template-maker-pro"
@@ -23,7 +23,13 @@ homeassistant_api: true
 auth_api: true
 options:
   supervisor_token: ""
+  confirm_beta: false
+  i_have_a_backup: false
+  i_wont_complain_on_github: false
 schema:
   supervisor_token: password?
+  confirm_beta: bool
+  i_have_a_backup: bool
+  i_wont_complain_on_github: bool
 map:
   - config:rw

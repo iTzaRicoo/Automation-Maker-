@@ -1,5 +1,5 @@
 name: "Dashboard Maker"
-version: "1.0.11"
+version: "1.0.12"
 slug: "dashboard_maker"
 description: "0-kennis wizard die automatisch WOW dashboards maakt (Mushroom + theme + demo)"
 arch:
@@ -35,12 +35,17 @@ options:
   access_token: ""
   supervisor_token: ""
   debug_mode: false
+  i_have_a_backup: false
+  i_wont_complain_on_github: false
 
 schema:
   dashboards_path: str
-  access_token: password
+  access_token: password?
   supervisor_token: password?
   debug_mode: bool
+  confirm_beta: bool
+  i_have_a_backup: bool
+  i_wont_complain_on_github: bool
 
 map:
   - config:rw

@@ -4,7 +4,7 @@ from __future__ import annotations
 from flask import Flask, request, jsonify, Response
 import os
 import re
-import shutil  # ← Voeg toe voor folder operations
+import shutil  # folder operations
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -25,6 +25,16 @@ APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
 
+# ✅ INGRESS FIX: Handle Home Assistant ingress proxy
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(
+    app.wsgi_app,
+    x_for=1,
+    x_proto=1,
+    x_host=1,
+    x_prefix=1
+)
+
 # -------------------------
 # Paths
 # -------------------------
@@ -32,11 +42,11 @@ HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 DASHBOARDS_PATH = os.environ.get("DASHBOARDS_PATH") or os.path.join(HA_CONFIG_PATH, "dashboards")
 ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
 
-# --- Mushroom install (UPDATED for v5.0.9 archive layout) ---
-MUSHROOM_VERSION = "5.0.9"  # ← Update versie
-MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"  # ← Nieuw URL format
+# --- Mushroom install (v5.0.9 archive layout) ---
+MUSHROOM_VERSION = "5.0.9"
+MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"
 WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
-MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "lovelace-mushroom")  # ← Naam aangepast
+MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "lovelace-mushroom")
 
 # --- Themes ---
 THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
@@ -81,9 +91,6 @@ def sanitize_filename(name: str) -> str:
     if not name:
         name = "unnamed"
     return name[:80]
-
-def norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 def safe_yaml_dump(obj: Any) -> str:
     class Dumper(yaml.SafeDumper):
@@ -173,7 +180,6 @@ def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
                 break
 
     debug_info["supervisor_token_found"] = bool(sup_tok)
-
     return (user_tok or None, sup_tok or None, debug_info)
 
 USER_TOKEN, SUPERVISOR_TOKEN, TOKEN_DEBUG = discover_tokens()
@@ -352,6 +358,7 @@ class HAConnection:
         )
 
         if r.status_code in (401, 403):
+            # reset and try once again
             self.active_base_url = None
             self.active_token = None
             self.active_mode = "unknown"
@@ -366,7 +373,6 @@ class HAConnection:
                     timeout=timeout,
                     verify=False
                 )
-
         return r
 
 conn = HAConnection()
@@ -391,7 +397,8 @@ def get_states() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/states", timeout=12)
         if r.status_code != 200:
             return []
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -400,7 +407,8 @@ def get_area_registry() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/config/area_registry", timeout=12)
         if r.status_code != 200:
             return []
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -409,13 +417,11 @@ def get_entity_registry() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/config/entity_registry", timeout=12)
         if r.status_code != 200:
             return []
-        return r.json()
+        data = r.json()
+        return data if isinstance(data, list) else []
     except Exception:
         return []
 
-# -------------------------
-# Error Handling Verbetering
-# -------------------------
 def safe_get_states() -> List[Dict[str, Any]]:
     """Safely get states with fallback"""
     try:
@@ -432,15 +438,18 @@ def safe_get_states() -> List[Dict[str, Any]]:
         return []
 
 # -------------------------
-# Mushroom install + resources (UPDATED)
+# Mushroom install + resources (v5.0.9)
 # -------------------------
 def mushroom_installed() -> bool:
     """Check if Mushroom is properly installed"""
     dist_path = os.path.join(MUSHROOM_PATH, "dist")
     if not os.path.exists(dist_path):
         return False
-    js_files = [f for f in os.listdir(dist_path) if f.endswith(".js")]
-    return len(js_files) > 0
+    try:
+        js_files = [f for f in os.listdir(dist_path) if f.endswith(".js")]
+        return len(js_files) > 0
+    except Exception:
+        return False
 
 def download_and_extract_zip(url: str, target_dir: str):
     """Download and extract Mushroom zip with correct structure"""
@@ -451,17 +460,15 @@ def download_and_extract_zip(url: str, target_dir: str):
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         z.extractall(target_dir)
 
-    # Find the extracted folder (it will be named lovelace-mushroom-X.X.X)
+    # GitHub archive creates folder like 'lovelace-mushroom-5.0.9/'
     for item in os.listdir(target_dir):
         if item.startswith("lovelace-mushroom-"):
             old_path = os.path.join(target_dir, item)
             new_path = os.path.join(target_dir, "lovelace-mushroom")
 
-            # Remove old folder if exists
             if os.path.exists(new_path):
                 shutil.rmtree(new_path)
 
-            # Rename
             os.rename(old_path, new_path)
             print(f"Renamed {item} → lovelace-mushroom")
             break
@@ -491,7 +498,6 @@ def ensure_mushroom_resource() -> str:
 
     resources = get_lovelace_resources()
 
-    # If already exists (exact) return OK. If an old mushroom url exists, we'll just add the new one.
     for res in resources:
         res_url = (res.get("url", "") or "")
         if res_url == desired_url:
@@ -592,7 +598,7 @@ def try_set_theme_auto() -> str:
     return "Theme geïnstalleerd (activeren niet gelukt)"
 
 # -------------------------
-# Register dashboard in Lovelace (configuration.yaml)
+# ✅ Cruciaal: registreer dashboard in configuration.yaml
 # -------------------------
 def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
@@ -624,7 +630,6 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     lovelace["dashboards"] = dashboards
 
     dashboard_key = filename.replace(".yaml", "").replace("_", "-").lower()
-
     dashboards[dashboard_key] = {
         "mode": "yaml",
         "title": title,
@@ -1064,11 +1069,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     list.classList.remove('hidden');
 
+    function esc(s){ return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
     let html = '';
     items.forEach(t => {
       html += '<div class="bg-slate-50 border-2 border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
-      html += '<div><div class="font-semibold">' + (t.name || '') + '</div>';
-      html += '<div class="text-sm text-slate-500 font-mono">' + (t.filename || '') + '</div></div>';
+      html += '<div><div class="font-semibold">' + esc(t.name) + '</div>';
+      html += '<div class="text-sm text-slate-500 font-mono">' + esc(t.filename) + '</div></div>';
       html += '<div class="flex gap-2 flex-wrap">';
       html += '<button onclick="downloadDashboard(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
       html += '<button onclick="deleteDashboard(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
@@ -1231,6 +1238,7 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
+    # Simple dashboard
     simple_title = f"{base_title} - Basis"
     states = safe_get_states()
     simple_entities = [
@@ -1247,14 +1255,27 @@ def api_create_dashboards():
     for ent in simple_entities:
         eid = ent.get("entity_id", "")
         if eid.startswith("light."):
-            simple_cards.append({"type": "custom:mushroom-light-card", "entity": eid, "use_light_color": True})
+            simple_cards.append({
+                "type": "custom:mushroom-light-card",
+                "entity": eid,
+                "use_light_color": True
+            })
         elif eid.startswith("climate."):
-            simple_cards.append({"type": "custom:mushroom-climate-card", "entity": eid})
+            simple_cards.append({
+                "type": "custom:mushroom-climate-card",
+                "entity": eid
+            })
         elif eid:
-            simple_cards.append({"type": "custom:mushroom-entity-card", "entity": eid})
+            simple_cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": eid
+            })
 
     if len(simple_cards) == 1:
-        simple_cards.append({"type": "markdown", "content": f"# {simple_title}\n\n✅ Dashboard aangemaakt!"})
+        simple_cards.append({
+            "type": "markdown",
+            "content": f"# {simple_title}\n\n✅ Dashboard aangemaakt!"
+        })
 
     simple_dash = {
         "title": simple_title,
@@ -1266,6 +1287,7 @@ def api_create_dashboards():
         }]
     }
 
+    # Advanced dashboard
     adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
@@ -1315,12 +1337,10 @@ def api_delete_dashboard():
     filename = (data.get("filename") or "").strip()
     if not is_safe_filename(filename):
         return jsonify({"error": "Ongeldige filename"}), 400
-
     filepath = os.path.join(DASHBOARDS_PATH, filename)
     if os.path.exists(filepath):
         os.remove(filepath)
         return jsonify({"success": True})
-
     return jsonify({"error": "Bestand niet gevonden"}), 404
 
 @app.route("/api/reload_lovelace", methods=["POST"])
@@ -1347,4 +1367,13 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print(f"{APP_NAME} starting... ({APP_VERSION})")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+    print("🌐 Starting Flask with ingress support...")
+    print("=" * 60 + "\n")
+
+    app.run(
+        host="0.0.0.0",
+        port=5001,
+        debug=False,
+        threaded=True,
+        use_reloader=False
+    )

@@ -457,35 +457,59 @@ def safe_get_states() -> List[Dict[str, Any]]:
 # -------------------------
 # Mushroom install + resources
 # -------------------------
+# ✅ Fix 2: Update mushroom_installed check
 def mushroom_installed() -> bool:
-    dist_path = os.path.join(MUSHROOM_PATH, "dist")
-    if not os.path.exists(dist_path):
-        return False
-    try:
-        js_files = [f for f in os.listdir(dist_path) if f.endswith(".js")]
-        return len(js_files) > 0
-    except Exception:
-        return False
+    # Check multiple possible locations for the dist folder
+    possible_paths = [
+        os.path.join(MUSHROOM_PATH, "dist"),
+        os.path.join(MUSHROOM_PATH, "build"),
+        MUSHROOM_PATH
+    ]
 
+    for check_path in possible_paths:
+        if os.path.exists(check_path):
+            try:
+                all_files: List[str] = []
+                for root, _dirs, files in os.walk(check_path):
+                    all_files.extend([f for f in files if f.endswith(".js")])
+                if all_files:
+                    print(f"✓ Mushroom JS gevonden: {len(all_files)} files in {check_path}")
+                    return True
+            except Exception as e:
+                print(f"Check error in {check_path}: {e}")
+
+    return False
+
+# ✅ Fix 1: Update download_and_extract_zip (temp extract + move)
 def download_and_extract_zip(url: str, target_dir: str):
     print(f"Downloading Mushroom from: {url}")
-    r = requests.get(url, timeout=45)
+    r = requests.get(url, timeout=45, verify=False)
     r.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        z.extractall(target_dir)
+        # Extract to temp location first
+        temp_extract = os.path.join(target_dir, "_temp_extract")
+        os.makedirs(temp_extract, exist_ok=True)
+        z.extractall(temp_extract)
 
-    for item in os.listdir(target_dir):
-        if item.startswith("lovelace-mushroom-"):
-            old_path = os.path.join(target_dir, item)
-            new_path = os.path.join(target_dir, "lovelace-mushroom")
+    # Find the extracted folder
+    extracted_items = os.listdir(temp_extract)
+    if not extracted_items:
+        shutil.rmtree(temp_extract)
+        raise RuntimeError("Zip was leeg")
 
-            if os.path.exists(new_path):
-                shutil.rmtree(new_path)
+    source_folder = os.path.join(temp_extract, extracted_items[0])
+    final_path = os.path.join(target_dir, "lovelace-mushroom")
 
-            os.rename(old_path, new_path)
-            print(f"Renamed {item} → lovelace-mushroom")
-            break
+    # Remove old install if exists
+    if os.path.exists(final_path):
+        shutil.rmtree(final_path)
+
+    # Move to final location
+    shutil.move(source_folder, final_path)
+    shutil.rmtree(temp_extract)
+
+    print(f"Mushroom geïnstalleerd in: {final_path}")
 
 def install_mushroom() -> str:
     os.makedirs(WWW_COMMUNITY, exist_ok=True)
@@ -493,7 +517,7 @@ def install_mushroom() -> str:
         return "Mushroom kaarten zijn al geïnstalleerd"
     download_and_extract_zip(MUSHROOM_GITHUB_ZIP, WWW_COMMUNITY)
     if not mushroom_installed():
-        raise RuntimeError("Mushroom install faalde: dist/*.js niet gevonden.")
+        raise RuntimeError("Mushroom install faalde: geen .js bestanden gevonden.")
     return "Mushroom kaarten geïnstalleerd (v5.0.9)"
 
 def get_lovelace_resources() -> List[Dict[str, Any]]:
@@ -506,23 +530,34 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+# ✅ Fix 3: Fallback naar CDN - Update ensure_mushroom_resource
 def ensure_mushroom_resource() -> str:
-    desired_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
+    # Try local install first
+    local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
+    # Fallback to CDN
+    cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
+
     resources = get_lovelace_resources()
 
+    # Check if already registered
     for res in resources:
-        if (res.get("url", "") or "") == desired_url:
+        url = res.get("url", "")
+        if local_url in url or "mushroom" in url:
             return "Mushroom resource staat goed"
 
-    payload = {"type": "module", "url": desired_url}
-    try:
-        r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
-        if r.status_code in (200, 201):
-            return "Mushroom resource toegevoegd (v5.0.9)"
-        return "Mushroom resource (best effort) OK"
-    except Exception as e:
-        print(f"Resource registration warning: {e}")
-        return "Mushroom resource (best effort) OK"
+    # Try local first, then CDN
+    for url_to_try in [local_url, cdn_url]:
+        payload = {"type": "module", "url": url_to_try}
+        try:
+            r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
+            if r.status_code in (200, 201):
+                source = "lokaal" if "local" in url_to_try else "CDN"
+                return f"Mushroom resource toegevoegd ({source})"
+        except Exception as e:
+            print(f"Resource registration via {url_to_try} failed: {e}")
+            continue
+
+    return "Mushroom resource (best effort) OK"
 
 # -------------------------
 # Theme generator
@@ -735,7 +770,7 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     }
 
 # -------------------------
-# HTML Wizard (YOUR HTML + ingress-safe API_BASE patch)
+# HTML Wizard (kept ingress-safe API_BASE)
 # -------------------------
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="nl">
@@ -909,7 +944,7 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 
 <script>
-  // ✅ INGRESS FIX: gebruik relatieve base, werkt zowel via ingress als via direct :5001
+  // ✅ INGRESS FIX
   var API_BASE = '.';
 
   function setStatus(text, color) {
@@ -949,15 +984,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
   async function init() {
     setStatus('Verbinden…', 'yellow');
-    console.log('🔍 Starting init...');
-
     try {
-      console.log('📡 Fetching ' + API_BASE + '/api/config ...');
       var cfgRes = await fetch(API_BASE + '/api/config');
-      console.log('📥 Response status:', cfgRes.status);
-
       var cfg = await cfgRes.json();
-      console.log('📦 Config data:', cfg);
 
       if (cfg.ha_ok) {
         setStatus('Verbonden (' + (cfg.active_mode || 'ok') + ')', 'green');
@@ -965,7 +994,6 @@ HTML_PAGE = """<!DOCTYPE html>
       } else {
         setStatus('Geen verbinding', 'red');
         setCheck('chkEngine', false, cfg.ha_message || 'Geen verbinding');
-        console.error('❌ HA connection failed:', cfg.ha_message);
       }
 
       setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
@@ -973,9 +1001,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
       setDot('step1', true);
     } catch (e) {
-      console.error('❌ Init error:', e);
+      console.error(e);
       setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden: ' + e.message);
+      setCheck('chkEngine', false, 'Kan niet verbinden');
       setCheck('chkCards', false, 'Kan niet verbinden');
       setCheck('chkStyle', false, 'Kan niet verbinden');
     }
@@ -985,25 +1013,19 @@ HTML_PAGE = """<!DOCTYPE html>
     var preset = document.getElementById('preset').value;
     var density = document.getElementById('density').value;
 
-    console.log('🚀 Starting setup...', { preset: preset, density: density });
     document.getElementById('setupHint').textContent = 'Bezig… (Mushroom + theme + auto licht/donker)';
     setCheck('chkCards', true, 'Bezig…');
     setCheck('chkStyle', true, 'Bezig…');
 
     try {
-      console.log('📡 Posting to ' + API_BASE + '/api/setup ...');
       var res = await fetch(API_BASE + '/api/setup', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ preset: preset, density: density })
       });
-
-      console.log('📥 Setup response status:', res.status);
       var data = await res.json();
-      console.log('📦 Setup data:', data);
 
       if (!res.ok || !data.ok) {
-        console.error('❌ Setup failed:', data);
         document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
         alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
         return;
@@ -1020,9 +1042,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
       alert('✅ Setup klaar!\\n\\n' + (data.steps ? data.steps.join('\\n') : ''));
     } catch (e) {
-      console.error('❌ Setup error:', e);
+      console.error(e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-      alert('❌ Instellen mislukt: ' + e.message);
+      alert('❌ Instellen mislukt.');
     }
   }
 
@@ -1038,7 +1060,7 @@ HTML_PAGE = """<!DOCTYPE html>
       showStep4();
     } catch (e) {
       console.error(e);
-      alert('❌ Demo mislukt: ' + e.message);
+      alert('❌ Demo mislukt.');
     }
   }
 
@@ -1071,7 +1093,7 @@ HTML_PAGE = """<!DOCTYPE html>
       showStep4();
     } catch (e) {
       console.error(e);
-      alert('❌ Maken mislukt: ' + e.message);
+      alert('❌ Maken mislukt.');
     }
   }
 
@@ -1090,9 +1112,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
   function copyAll() {
     var text = document.getElementById('advancedOut').textContent || '';
-    navigator.clipboard.writeText(text).then(function() {
-      alert('📋 Gekopieerd!');
-    });
+    navigator.clipboard.writeText(text).then(function() { alert('📋 Gekopieerd!'); });
   }
 
   async function loadDashboards() {
@@ -1150,10 +1170,8 @@ HTML_PAGE = """<!DOCTYPE html>
   }
 
   async function openDebug() {
-    console.log('🔍 Opening debug...');
     var res = await fetch(API_BASE + '/api/debug/ha');
     var data = await res.json();
-    console.log('🐛 Debug data:', data);
     alert(JSON.stringify(data, null, 2));
   }
 
@@ -1165,7 +1183,6 @@ HTML_PAGE = """<!DOCTYPE html>
     alert('✅ Klaar om nog een dashboard te maken.');
   }
 
-  console.log('🎬 Script loaded, calling init()...');
   init();
 </script>
 </body>
@@ -1284,7 +1301,6 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
-    # Simple dashboard
     simple_title = f"{base_title} - Basis"
     states = safe_get_states()
     simple_entities = [
@@ -1333,7 +1349,6 @@ def api_create_dashboards():
         }]
     }
 
-    # Advanced dashboard
     adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
@@ -1409,7 +1424,6 @@ def api_reload_lovelace():
 
     return jsonify({"ok": False, "error": "Vernieuwen lukt niet.", "details": last}), 400
 
-# ✅ Debug endpoint om tokens te controleren
 @app.route("/api/debug/tokens", methods=["GET"])
 def api_debug_tokens():
     return jsonify({

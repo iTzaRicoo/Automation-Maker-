@@ -4,6 +4,7 @@ from __future__ import annotations
 from flask import Flask, request, jsonify, Response
 import os
 import re
+import shutil  # ← Voeg toe voor folder operations
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -12,6 +13,12 @@ import yaml
 import zipfile
 import io
 import json
+
+# -------------------------
+# SSL Warning Fix
+# -------------------------
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 APP_VERSION = "1.0.9"
 APP_NAME = "Dashboard Maker"
@@ -25,11 +32,11 @@ HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 DASHBOARDS_PATH = os.environ.get("DASHBOARDS_PATH") or os.path.join(HA_CONFIG_PATH, "dashboards")
 ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
 
-# --- Mushroom install ---
-MUSHROOM_VERSION = "3.3.0"
-MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/releases/download/v{MUSHROOM_VERSION}/mushroom.zip"
+# --- Mushroom install (UPDATED for v5.0.9 archive layout) ---
+MUSHROOM_VERSION = "5.0.9"  # ← Update versie
+MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"  # ← Nieuw URL format
 WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
-MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "mushroom")
+MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "lovelace-mushroom")  # ← Naam aangepast
 
 # --- Themes ---
 THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
@@ -191,7 +198,7 @@ for url in HA_URLS:
 print(f"{'='*60}\n")
 
 # -------------------------
-# HA Connection (no globals mutation inside methods)
+# HA Connection
 # -------------------------
 class HAConnection:
     def __init__(self):
@@ -281,13 +288,11 @@ class HAConnection:
 
         attempts: List[Tuple[str, str, str]] = []
 
-        # Prefer LLAT everywhere
         if self.user_token:
             for url in HA_URLS:
                 mode = "supervisor" if "supervisor" in url else "direct"
                 attempts.append((url, self.user_token, mode))
 
-        # Supervisor token only makes sense via supervisor/core typically
         if self.supervisor_token:
             for url in HA_URLS:
                 if "supervisor" in url:
@@ -347,7 +352,6 @@ class HAConnection:
         )
 
         if r.status_code in (401, 403):
-            # reset and try once again
             self.active_base_url = None
             self.active_token = None
             self.active_mode = "unknown"
@@ -410,16 +414,57 @@ def get_entity_registry() -> List[Dict[str, Any]]:
         return []
 
 # -------------------------
-# Mushroom install + resources
+# Error Handling Verbetering
+# -------------------------
+def safe_get_states() -> List[Dict[str, Any]]:
+    """Safely get states with fallback"""
+    try:
+        states = get_states()
+        if not states:
+            return [{
+                "entity_id": "sun.sun",
+                "state": "above_horizon",
+                "attributes": {}
+            }]
+        return states
+    except Exception as e:
+        print(f"Error getting states: {e}")
+        return []
+
+# -------------------------
+# Mushroom install + resources (UPDATED)
 # -------------------------
 def mushroom_installed() -> bool:
-    return os.path.exists(os.path.join(MUSHROOM_PATH, "mushroom.js"))
+    """Check if Mushroom is properly installed"""
+    dist_path = os.path.join(MUSHROOM_PATH, "dist")
+    if not os.path.exists(dist_path):
+        return False
+    js_files = [f for f in os.listdir(dist_path) if f.endswith(".js")]
+    return len(js_files) > 0
 
 def download_and_extract_zip(url: str, target_dir: str):
+    """Download and extract Mushroom zip with correct structure"""
+    print(f"Downloading Mushroom from: {url}")
     r = requests.get(url, timeout=45)
     r.raise_for_status()
+
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         z.extractall(target_dir)
+
+    # Find the extracted folder (it will be named lovelace-mushroom-X.X.X)
+    for item in os.listdir(target_dir):
+        if item.startswith("lovelace-mushroom-"):
+            old_path = os.path.join(target_dir, item)
+            new_path = os.path.join(target_dir, "lovelace-mushroom")
+
+            # Remove old folder if exists
+            if os.path.exists(new_path):
+                shutil.rmtree(new_path)
+
+            # Rename
+            os.rename(old_path, new_path)
+            print(f"Renamed {item} → lovelace-mushroom")
+            break
 
 def install_mushroom() -> str:
     os.makedirs(WWW_COMMUNITY, exist_ok=True)
@@ -427,8 +472,8 @@ def install_mushroom() -> str:
         return "Mushroom kaarten zijn al geïnstalleerd"
     download_and_extract_zip(MUSHROOM_GITHUB_ZIP, WWW_COMMUNITY)
     if not mushroom_installed():
-        raise RuntimeError("Mushroom install faalde: mushroom.js niet gevonden.")
-    return "Mushroom kaarten geïnstalleerd"
+        raise RuntimeError("Mushroom install faalde: dist/*.js niet gevonden.")
+    return "Mushroom kaarten geïnstalleerd (v5.0.9)"
 
 def get_lovelace_resources() -> List[Dict[str, Any]]:
     try:
@@ -441,17 +486,27 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
         return []
 
 def ensure_mushroom_resource() -> str:
-    desired_url = "/local/community/mushroom/mushroom.js"
+    """Register Mushroom in Lovelace resources"""
+    desired_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
+
     resources = get_lovelace_resources()
-    if any((x.get("url") == desired_url) for x in resources):
-        return "Mushroom resource staat goed"
+
+    # If already exists (exact) return OK. If an old mushroom url exists, we'll just add the new one.
+    for res in resources:
+        res_url = (res.get("url", "") or "")
+        if res_url == desired_url:
+            return "Mushroom resource staat goed"
+        if "mushroom" in res_url.lower() and res_url != desired_url:
+            print(f"Found existing Mushroom-like resource: {res_url} (will add new path too)")
+
     payload = {"type": "module", "url": desired_url}
     try:
         r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
         if r.status_code in (200, 201):
-            return "Mushroom resource toegevoegd"
+            return "Mushroom resource toegevoegd (v5.0.9)"
         return "Mushroom resource (best effort) OK"
-    except Exception:
+    except Exception as e:
+        print(f"Resource registration warning: {e}")
         return "Mushroom resource (best effort) OK"
 
 # -------------------------
@@ -483,8 +538,6 @@ def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
   ha-card-box-shadow: "{shadow}"
   ha-card-background: "rgba(255,255,255,0.92)"
 
-  # Let op: card-mod moet je eventueel nog apart installeren (optioneel).
-  # Zonder card-mod werkt dit theme nog steeds prima.
   card-mod-theme: "{THEME_NAME}"
   card-mod-card: |
     ha-card {{
@@ -539,25 +592,137 @@ def try_set_theme_auto() -> str:
     return "Theme geïnstalleerd (activeren niet gelukt)"
 
 # -------------------------
-# Minimal dashboard builder (safe test)
+# Register dashboard in Lovelace (configuration.yaml)
+# -------------------------
+def register_dashboard_in_lovelace(filename: str, title: str) -> str:
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"Warning: Could not read configuration.yaml: {e}")
+            config = {}
+    else:
+        config = {}
+
+    if not isinstance(config, dict):
+        config = {}
+
+    lovelace = config.get("lovelace")
+    if not isinstance(lovelace, dict):
+        lovelace = {}
+    config["lovelace"] = lovelace
+
+    if "mode" not in lovelace or not isinstance(lovelace.get("mode"), str):
+        lovelace["mode"] = "storage"
+
+    dashboards = lovelace.get("dashboards")
+    if not isinstance(dashboards, dict):
+        dashboards = {}
+    lovelace["dashboards"] = dashboards
+
+    dashboard_key = filename.replace(".yaml", "").replace("_", "-").lower()
+
+    dashboards[dashboard_key] = {
+        "mode": "yaml",
+        "title": title,
+        "icon": "mdi:view-dashboard",
+        "show_in_sidebar": True,
+        "filename": f"dashboards/{filename}",
+    }
+
+    try:
+        with open(config_yaml_path, "w", encoding="utf-8") as f:
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        return f"Dashboard geregistreerd: {title}"
+    except Exception as e:
+        return f"Registratie gefaald: {str(e)}"
+
+# -------------------------
+# Dashboard Generator Fix
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
+    """Generate a real working dashboard with Mushroom cards"""
+    states = safe_get_states()
+    _areas = get_area_registry()
+
+    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
+    switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")]
+    sensors = [e for e in states if (e.get("entity_id", "") or "").startswith("sensor.")]
+    climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")]
+
+    cards: List[Dict[str, Any]] = []
+
+    cards.append({
+        "type": "custom:mushroom-title-card",
+        "title": dashboard_title,
+        "subtitle": "{{ now().strftime('%d %B %Y') }}"
+    })
+
+    if lights:
+        cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting"})
+        for light in lights[:6]:
+            cards.append({
+                "type": "custom:mushroom-light-card",
+                "entity": light["entity_id"],
+                "use_light_color": True,
+                "show_brightness_control": True,
+                "collapsible_controls": True
+            })
+
+    if climate:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat"})
+        for c in climate[:3]:
+            cards.append({
+                "type": "custom:mushroom-climate-card",
+                "entity": c["entity_id"],
+                "show_temperature_control": True,
+                "collapsible_controls": True
+            })
+
+    if switches:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars"})
+        for sw in switches[:6]:
+            cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": sw["entity_id"],
+                "tap_action": {"action": "toggle"}
+            })
+
+    temp_sensors = [s for s in sensors if "temperature" in (s.get("entity_id", "").lower())]
+    if temp_sensors:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Temperaturen"})
+        for temp in temp_sensors[:4]:
+            cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": temp["entity_id"],
+                "icon": "mdi:thermometer"
+            })
+
+    if len(cards) == 1 and not (lights or switches or climate or temp_sensors):
+        cards.append({
+            "type": "markdown",
+            "content": f"# {dashboard_title}\n\n✅ Dashboard aangemaakt!\n\nVoeg handmatig kaarten toe via de UI editor."
+        })
+
     return {
         "title": dashboard_title,
-        "views": [
-            {
-                "title": "WOW",
-                "path": "wow",
-                "icon": "mdi:star-four-points",
-                "cards": [
-                    {"type": "markdown", "content": f"# {dashboard_title}\n\n✅ Dashboard Maker werkt!\n\n- Mushroom: {mushroom_installed()}\n- Tijd: {{% raw %}}{{{{ now() }}}}{{% endraw %}}"}
-                ],
-            }
-        ],
+        "views": [{
+            "title": "Home",
+            "path": "home",
+            "icon": "mdi:home",
+            "type": "sections",
+            "sections": [{
+                "type": "grid",
+                "cards": cards
+            }]
+        }]
     }
 
 # -------------------------
-# HTML Wizard (complete)
+# HTML Wizard
 # -------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="nl">
@@ -567,11 +732,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <title>__APP_NAME__</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-
 <body class="bg-gradient-to-br from-slate-50 to-indigo-50 min-h-screen p-4">
   <div class="max-w-5xl mx-auto">
     <div class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 mb-6">
-
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 class="text-3xl sm:text-4xl font-bold text-indigo-900">🧩 __APP_NAME__</h1>
@@ -584,17 +747,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span>Verbinden…</span>
           </div>
           <div class="flex gap-2 flex-wrap">
-            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-              🔄 Vernieuwen
-            </button>
-            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-              🧾 Debug
-            </button>
+            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
+            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🧾 Debug</button>
           </div>
         </div>
       </div>
 
-      <!-- Progress -->
       <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6">
         <div class="flex items-center justify-between text-sm font-semibold">
           <div id="step1Dot" class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-indigo-500 inline-block"></span> Stap 1</div>
@@ -607,7 +765,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Step 1 -->
       <div id="step1" class="border border-slate-200 rounded-2xl p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -626,7 +783,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <option value="amber_warm">Amber Warm</option>
               <option value="rose_neon">Rose Neon</option>
             </select>
-            <p class="text-xs text-slate-500 mt-2">Kies een vibe. Alles wordt meteen strak.</p>
           </div>
 
           <div class="bg-white border border-slate-200 rounded-xl p-4">
@@ -635,7 +791,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <option value="comfy">Comfy (luchtig)</option>
               <option value="compact">Compact (minder scroll)</option>
             </select>
-            <p class="text-xs text-slate-500 mt-2">Compact = meer op 1 scherm (mobiel).</p>
           </div>
         </div>
 
@@ -658,13 +813,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <button onclick="runSetup()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
             🚀 Alles automatisch instellen
           </button>
-          <div class="text-sm text-slate-500 flex items-center">
-            <span id="setupHint">Klik één keer. Wij doen de rest.</span>
-          </div>
+          <div class="text-sm text-slate-500 flex items-center"><span id="setupHint">Klik één keer. Wij doen de rest.</span></div>
         </div>
       </div>
 
-      <!-- Step 2 -->
       <div id="step2" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -678,13 +830,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <button onclick="createDemo()" class="w-full sm:w-auto bg-slate-900 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:bg-black shadow-lg">
             ✨ Maak demo dashboard
           </button>
-          <div class="text-sm text-slate-500 flex items-center">
-            <span>Je kunt dit later verwijderen.</span>
-          </div>
         </div>
       </div>
 
-      <!-- Step 3 -->
       <div id="step3" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -714,14 +862,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <div class="font-bold text-slate-900">Technische output</div>
             <button onclick="copyAll()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">📋 Copy</button>
           </div>
-          <p class="text-xs text-slate-500 mt-1">Niet nodig om te gebruiken.</p>
           <div class="bg-gray-900 text-green-400 p-3 rounded-xl overflow-x-auto text-xs font-mono mt-3" style="min-height: 120px;">
             <pre id="advancedOut">—</pre>
           </div>
         </div>
       </div>
 
-      <!-- Step 4 -->
       <div id="step4" class="border border-slate-200 rounded-2xl p-5 mt-4 hidden">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -778,10 +924,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
   function showStep4() {
     document.getElementById('step4').classList.remove('hidden');
     setDot('step4', true);
-  }
-
-  function escapeHtml(str) {
-    return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
   function setCheck(id, ok, msg) {
@@ -847,7 +989,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       setDot('step2', true);
       setDot('step3', true);
 
-      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
+      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\\n') : ''));
     } catch (e) {
       console.error(e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
@@ -883,10 +1025,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       const adv = document.getElementById('advancedPanel');
       if (!adv.classList.contains('hidden')) {
-        document.getElementById('advancedOut').textContent = (data.simple_code || '') + '\n---\n' + (data.advanced_code || '');
+        document.getElementById('advancedOut').textContent =
+          (data.simple_code || '') + '\\n---\\n' + (data.advanced_code || '');
       }
 
-      alert('✅ Klaar!\n- ' + data.simple_filename + '\n- ' + data.advanced_filename);
+      alert('✅ Klaar!\\n- ' + data.simple_filename + '\\n- ' + data.advanced_filename);
       showStep4();
     } catch (e) {
       console.error(e);
@@ -924,8 +1067,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     let html = '';
     items.forEach(t => {
       html += '<div class="bg-slate-50 border-2 border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
-      html += '<div><div class="font-semibold">' + escapeHtml(t.name) + '</div>';
-      html += '<div class="text-sm text-slate-500 font-mono">' + escapeHtml(t.filename) + '</div></div>';
+      html += '<div><div class="font-semibold">' + (t.name || '') + '</div>';
+      html += '<div class="text-sm text-slate-500 font-mono">' + (t.filename || '') + '</div></div>';
       html += '<div class="flex gap-2 flex-wrap">';
       html += '<button onclick="downloadDashboard(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
       html += '<button onclick="deleteDashboard(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
@@ -1052,7 +1195,6 @@ def api_setup():
         steps.append(install_dashboard_theme(preset, density))
         steps.append(try_set_theme_auto())
 
-        # reload lovelace best effort
         ha_call_service("lovelace", "reload", {})
         steps.append("Lovelace reload (best effort)")
 
@@ -1071,7 +1213,12 @@ def api_create_demo():
     code = safe_yaml_dump(dash)
     fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
     write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
-    return jsonify({"success": True, "filename": fn}), 200
+
+    reg_msg = register_dashboard_in_lovelace(fn, title)
+    ha_call_service("homeassistant", "reload_core_config", {})
+    ha_call_service("lovelace", "reload", {})
+
+    return jsonify({"success": True, "filename": fn, "register": reg_msg}), 200
 
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
@@ -1084,10 +1231,42 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
-    simple_title = f"{base_title} Simpel"
-    adv_title = f"{base_title} Uitgebreid"
+    simple_title = f"{base_title} - Basis"
+    states = safe_get_states()
+    simple_entities = [
+        e for e in states
+        if any((e.get("entity_id", "") or "").startswith(d) for d in ["light.", "switch.", "climate."])
+    ][:10]
 
-    simple_dash = build_dashboard_yaml(simple_title)
+    simple_cards: List[Dict[str, Any]] = [{
+        "type": "custom:mushroom-title-card",
+        "title": simple_title,
+        "subtitle": "Eenvoudig overzicht"
+    }]
+
+    for ent in simple_entities:
+        eid = ent.get("entity_id", "")
+        if eid.startswith("light."):
+            simple_cards.append({"type": "custom:mushroom-light-card", "entity": eid, "use_light_color": True})
+        elif eid.startswith("climate."):
+            simple_cards.append({"type": "custom:mushroom-climate-card", "entity": eid})
+        elif eid:
+            simple_cards.append({"type": "custom:mushroom-entity-card", "entity": eid})
+
+    if len(simple_cards) == 1:
+        simple_cards.append({"type": "markdown", "content": f"# {simple_title}\n\n✅ Dashboard aangemaakt!"})
+
+    simple_dash = {
+        "title": simple_title,
+        "views": [{
+            "title": "Overzicht",
+            "path": "overview",
+            "type": "sections",
+            "sections": [{"type": "grid", "cards": simple_cards}]
+        }]
+    }
+
+    adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
     simple_code = safe_yaml_dump(simple_dash)
@@ -1099,12 +1278,19 @@ def api_create_dashboards():
     write_text_file(os.path.join(DASHBOARDS_PATH, simple_fn), simple_code)
     write_text_file(os.path.join(DASHBOARDS_PATH, adv_fn), adv_code)
 
+    reg1 = register_dashboard_in_lovelace(simple_fn, simple_title)
+    reg2 = register_dashboard_in_lovelace(adv_fn, adv_title)
+
+    ha_call_service("homeassistant", "reload_core_config", {})
+    ha_call_service("lovelace", "reload", {})
+
     return jsonify({
         "success": True,
         "simple_filename": simple_fn,
         "advanced_filename": adv_fn,
         "simple_code": simple_code,
         "advanced_code": adv_code,
+        "register": [reg1, reg2],
     }), 200
 
 @app.route("/api/dashboards", methods=["GET"])
@@ -1129,10 +1315,12 @@ def api_delete_dashboard():
     filename = (data.get("filename") or "").strip()
     if not is_safe_filename(filename):
         return jsonify({"error": "Ongeldige filename"}), 400
+
     filepath = os.path.join(DASHBOARDS_PATH, filename)
     if os.path.exists(filepath):
         os.remove(filepath)
         return jsonify({"success": True})
+
     return jsonify({"error": "Bestand niet gevonden"}), 404
 
 @app.route("/api/reload_lovelace", methods=["POST"])

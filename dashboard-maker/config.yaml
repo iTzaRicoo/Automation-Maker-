@@ -1,7 +1,8 @@
 name: "Dashboard Maker"
-version: "1.0.13"
+version: "1.0.14"
 slug: "dashboard_maker"
-description: "0-kennis wizard die automatisch WOW dashboards maakt (Mushroom + theme + demo)"
+description: "Maak professionele Home Assistant dashboards zonder code - Mushroom + Premium Themes"
+url: "https://github.com/iTzaRicoo/Automation-Maker-/tree/main/dashboard-maker"  # ← Voeg toe
 arch:
   - armhf
   - armv7
@@ -9,44 +10,39 @@ arch:
   - amd64
   - i386
 init: false
-
 ports:
   5001/tcp: 5001
 ports_description:
-  5001/tcp: "Web interface"
-
+  5001/tcp: "Web interface (alleen bij niet-ingress gebruik)"
 webui: "http://[HOST]:[PORT:5001]"
 startup: application
 boot: auto
-
 hassio_api: true
 hassio_role: default
 homeassistant_api: true
 auth_api: true
-
 ingress: true
 ingress_port: 5001
-
+ingress_entry: "/"
 panel_icon: mdi:view-dashboard-variant
 panel_title: Dashboard Maker
 
 options:
-  dashboards_path: "/config/dashboards"
   access_token: ""
   supervisor_token: ""
+  dashboards_path: "/config/dashboards"
   debug_mode: false
-  i_have_a_backup: false
-  i_wont_complain_on_github: false
-
+  
 schema:
-  dashboards_path: str
   access_token: password?
   supervisor_token: password?
+  dashboards_path: str
   debug_mode: bool
-  confirm_beta: bool
-  i_have_a_backup: bool
-  i_wont_complain_on_github: bool
 
 map:
   - config:rw
   - share:rw
+  - ssl:ro  # ← OPTIONEEL: Als je SSL certs nodig hebt
+
+environment:
+  LOG_LEVEL: info  # ← OPTIONEEL: Voor logging

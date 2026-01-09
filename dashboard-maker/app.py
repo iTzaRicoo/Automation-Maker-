@@ -156,9 +156,6 @@ def next_available_filename(base_dir: str, desired: str) -> str:
 # Token discovery (improved)
 # -------------------------
 def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
-    """
-    Returns (user_token, supervisor_token, debug_info)
-    """
     debug_info: Dict[str, Any] = {
         "addon_options_exists": os.path.exists(ADDON_OPTIONS_PATH),
         "env_homeassistant_token": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
@@ -170,12 +167,9 @@ def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     debug_info["options_json_keys"] = sorted(list(opts.keys()))
     debug_info["options_json_content"] = str(opts)[:200]
 
-    # ✅ Eerst omgevingsvariabelen proberen
     user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
     if not user_tok:
         user_tok = (opts.get("access_token", "") or "").strip()
-
-    # ✅ Ook "ha_token" proberen (alternatieve naam)
     if not user_tok:
         user_tok = (opts.get("ha_token", "") or "").strip()
 
@@ -254,7 +248,6 @@ class HAConnection:
             h["Authorization"] = f"Bearer {token}"
         return h
 
-    # ✅ Test connectie verbeteren
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -448,7 +441,6 @@ def get_entity_registry() -> List[Dict[str, Any]]:
         return []
 
 def safe_get_states() -> List[Dict[str, Any]]:
-    """Safely get states with fallback"""
     try:
         states = get_states()
         if not states:
@@ -466,7 +458,6 @@ def safe_get_states() -> List[Dict[str, Any]]:
 # Mushroom install + resources
 # -------------------------
 def mushroom_installed() -> bool:
-    """Check if Mushroom is properly installed"""
     dist_path = os.path.join(MUSHROOM_PATH, "dist")
     if not os.path.exists(dist_path):
         return False
@@ -477,7 +468,6 @@ def mushroom_installed() -> bool:
         return False
 
 def download_and_extract_zip(url: str, target_dir: str):
-    """Download and extract Mushroom zip with correct structure"""
     print(f"Downloading Mushroom from: {url}")
     r = requests.get(url, timeout=45)
     r.raise_for_status()
@@ -485,7 +475,6 @@ def download_and_extract_zip(url: str, target_dir: str):
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         z.extractall(target_dir)
 
-    # GitHub archive folder like 'lovelace-mushroom-5.0.9/'
     for item in os.listdir(target_dir):
         if item.startswith("lovelace-mushroom-"):
             old_path = os.path.join(target_dir, item)
@@ -518,13 +507,11 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
         return []
 
 def ensure_mushroom_resource() -> str:
-    """Register Mushroom in Lovelace resources"""
     desired_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
     resources = get_lovelace_resources()
 
     for res in resources:
-        res_url = (res.get("url", "") or "")
-        if res_url == desired_url:
+        if (res.get("url", "") or "") == desired_url:
             return "Mushroom resource staat goed"
 
     payload = {"type": "module", "url": desired_url}
@@ -671,7 +658,6 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
 # Dashboard Generator (real Mushroom cards)
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
-    """Generate a real working dashboard with Mushroom cards"""
     states = safe_get_states()
     _areas = get_area_registry()
 
@@ -749,9 +735,9 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     }
 
 # -------------------------
-# HTML Wizard (Ingress-proof JS: uses ./api/...)
+# HTML Wizard (YOUR HTML + ingress-safe API_BASE patch)
 # -------------------------
-HTML_PAGE = r"""<!DOCTYPE html>
+HTML_PAGE = """<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
@@ -759,11 +745,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <title>__APP_NAME__</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-
 <body class="bg-gradient-to-br from-slate-50 to-indigo-50 min-h-screen p-4">
   <div class="max-w-5xl mx-auto">
     <div class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 mb-6">
-
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 class="text-3xl sm:text-4xl font-bold text-indigo-900">🧩 __APP_NAME__</h1>
@@ -776,17 +760,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span>Verbinden…</span>
           </div>
           <div class="flex gap-2 flex-wrap">
-            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-              🔄 Vernieuwen
-            </button>
-            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
-              🧾 Debug
-            </button>
+            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
+            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🧾 Debug</button>
           </div>
         </div>
       </div>
 
-      <!-- Progress -->
       <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6">
         <div class="flex items-center justify-between text-sm font-semibold">
           <div id="step1Dot" class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-indigo-500 inline-block"></span> Stap 1</div>
@@ -799,7 +778,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Step 1 -->
       <div id="step1" class="border border-slate-200 rounded-2xl p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -848,13 +826,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <button onclick="runSetup()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
             🚀 Alles automatisch instellen
           </button>
-          <div class="text-sm text-slate-500 flex items-center">
-            <span id="setupHint">Klik één keer. Wij doen de rest.</span>
-          </div>
+          <div class="text-sm text-slate-500 flex items-center"><span id="setupHint">Klik één keer. Wij doen de rest.</span></div>
         </div>
       </div>
 
-      <!-- Step 2 -->
       <div id="step2" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -871,7 +846,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Step 3 -->
       <div id="step3" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -907,7 +881,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Step 4 -->
       <div id="step4" class="border border-slate-200 rounded-2xl p-5 mt-4 hidden">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -936,18 +909,19 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
 <script>
-  // ✅ Ingress-proof: use relative base so calls hit THIS add-on, not HA core
-  const API_BASE = '.';
+  // ✅ INGRESS FIX: gebruik relatieve base, werkt zowel via ingress als via direct :5001
+  var API_BASE = '.';
 
-  function setStatus(text, color = 'gray') {
+  function setStatus(text, color) {
+    color = color || 'gray';
     document.getElementById('status').innerHTML =
       '<span class="inline-block w-3 h-3 bg-' + color + '-500 rounded-full mr-2"></span>' +
       '<span class="text-' + color + '-700">' + text + '</span>';
   }
 
   function setDot(step, active) {
-    const el = document.getElementById(step + 'Dot');
-    const dot = el.querySelector('span');
+    var el = document.getElementById(step + 'Dot');
+    var dot = el.querySelector('span');
     if (active) {
       el.classList.remove('text-slate-500');
       dot.className = 'w-3 h-3 rounded-full bg-indigo-500 inline-block';
@@ -958,7 +932,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   function unlockStep(stepId) {
-    const el = document.getElementById(stepId);
+    var el = document.getElementById(stepId);
     el.classList.remove('opacity-50', 'pointer-events-none');
   }
 
@@ -968,7 +942,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   function setCheck(id, ok, msg) {
-    const el = document.getElementById(id);
+    var el = document.getElementById(id);
     el.textContent = (ok ? '✅ ' : '❌ ') + msg;
     el.className = 'text-sm mt-1 ' + (ok ? 'text-green-700' : 'text-red-700');
   }
@@ -976,11 +950,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
   async function init() {
     setStatus('Verbinden…', 'yellow');
     console.log('🔍 Starting init...');
+
     try {
-      console.log('📡 Fetching', API_BASE + '/api/config');
-      const cfgRes = await fetch(API_BASE + '/api/config');
+      console.log('📡 Fetching ' + API_BASE + '/api/config ...');
+      var cfgRes = await fetch(API_BASE + '/api/config');
       console.log('📥 Response status:', cfgRes.status);
-      const cfg = await cfgRes.json();
+
+      var cfg = await cfgRes.json();
       console.log('📦 Config data:', cfg);
 
       if (cfg.ha_ok) {
@@ -1006,30 +982,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   async function runSetup() {
-    const preset = document.getElementById('preset').value;
-    const density = document.getElementById('density').value;
+    var preset = document.getElementById('preset').value;
+    var density = document.getElementById('density').value;
 
-    console.log('🚀 Starting setup...', { preset, density });
+    console.log('🚀 Starting setup...', { preset: preset, density: density });
     document.getElementById('setupHint').textContent = 'Bezig… (Mushroom + theme + auto licht/donker)';
     setCheck('chkCards', true, 'Bezig…');
     setCheck('chkStyle', true, 'Bezig…');
 
     try {
-      console.log('📡 Posting to', API_BASE + '/api/setup');
-      const res = await fetch(API_BASE + '/api/setup', {
+      console.log('📡 Posting to ' + API_BASE + '/api/setup ...');
+      var res = await fetch(API_BASE + '/api/setup', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ preset, density })
+        body: JSON.stringify({ preset: preset, density: density })
       });
 
       console.log('📥 Setup response status:', res.status);
-      const data = await res.json();
+      var data = await res.json();
       console.log('📦 Setup data:', data);
 
       if (!res.ok || !data.ok) {
         console.error('❌ Setup failed:', data);
         document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-        return alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
+        alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
+        return;
       }
 
       setCheck('chkCards', true, 'Klaar');
@@ -1041,7 +1018,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       setDot('step2', true);
       setDot('step3', true);
 
-      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
+      alert('✅ Setup klaar!\\n\\n' + (data.steps ? data.steps.join('\\n') : ''));
     } catch (e) {
       console.error('❌ Setup error:', e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
@@ -1051,9 +1028,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function createDemo() {
     try {
-      const res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || !data.success) return alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
+      var res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
+      var data = await res.json();
+      if (!res.ok || !data.success) {
+        alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
+        return;
+      }
       alert('✅ Demo gemaakt: ' + data.filename);
       showStep4();
     } catch (e) {
@@ -1063,25 +1043,31 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   async function createMine() {
-    const base_title = document.getElementById('dashName').value.trim();
-    if (!base_title) return alert('❌ Vul een naam in.');
+    var base_title = document.getElementById('dashName').value.trim();
+    if (!base_title) {
+      alert('❌ Vul een naam in.');
+      return;
+    }
 
     try {
-      const res = await fetch(API_BASE + '/api/create_dashboards', {
+      var res = await fetch(API_BASE + '/api/create_dashboards', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ base_title })
+        body: JSON.stringify({ base_title: base_title })
       });
-      const data = await res.json();
-      if (!res.ok || !data.success) return alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
-
-      const adv = document.getElementById('advancedPanel');
-      if (!adv.classList.contains('hidden')) {
-        document.getElementById('advancedOut').textContent =
-          (data.simple_code || '') + '\n---\n' + (data.advanced_code || '');
+      var data = await res.json();
+      if (!res.ok || !data.success) {
+        alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
+        return;
       }
 
-      alert('✅ Klaar!\n- ' + data.simple_filename + '\n- ' + data.advanced_filename);
+      var adv = document.getElementById('advancedPanel');
+      if (!adv.classList.contains('hidden')) {
+        document.getElementById('advancedOut').textContent =
+          (data.simple_code || '') + '\\n---\\n' + (data.advanced_code || '');
+      }
+
+      alert('✅ Klaar!\\n- ' + data.simple_filename + '\\n- ' + data.advanced_filename);
       showStep4();
     } catch (e) {
       console.error(e);
@@ -1103,28 +1089,33 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   function copyAll() {
-    const text = document.getElementById('advancedOut').textContent || '';
-    navigator.clipboard.writeText(text).then(() => alert('📋 Gekopieerd!'));
+    var text = document.getElementById('advancedOut').textContent || '';
+    navigator.clipboard.writeText(text).then(function() {
+      alert('📋 Gekopieerd!');
+    });
   }
 
   async function loadDashboards() {
-    const response = await fetch(API_BASE + '/api/dashboards');
-    const items = await response.json();
+    var response = await fetch(API_BASE + '/api/dashboards');
+    var items = await response.json();
 
-    const list = document.getElementById('dashboardsList');
-    const content = document.getElementById('dashboardsContent');
+    var list = document.getElementById('dashboardsList');
+    var content = document.getElementById('dashboardsContent');
 
     if (!items.length) {
       list.classList.add('hidden');
-      return alert('Nog geen dashboards opgeslagen!');
+      alert('Nog geen dashboards opgeslagen!');
+      return;
     }
 
     list.classList.remove('hidden');
 
-    function esc(s){ return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function esc(s) {
+      return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
 
-    let html = '';
-    items.forEach(t => {
+    var html = '';
+    items.forEach(function(t) {
       html += '<div class="bg-slate-50 border-2 border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">';
       html += '<div><div class="font-semibold">' + esc(t.name) + '</div>';
       html += '<div class="text-sm text-slate-500 font-mono">' + esc(t.filename) + '</div></div>';
@@ -1140,12 +1131,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function deleteDashboard(filename) {
     if (!confirm('Weet je zeker dat je dit dashboard wilt verwijderen?')) return;
-    const response = await fetch(API_BASE + '/api/delete_dashboard', {
+    var response = await fetch(API_BASE + '/api/delete_dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename })
+      body: JSON.stringify({ filename: filename })
     });
-    const result = await response.json();
+    var result = await response.json();
     if (response.ok) {
       alert('✅ Verwijderd!');
       loadDashboards();
@@ -1159,8 +1150,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   async function openDebug() {
-    const res = await fetch(API_BASE + '/api/debug/ha');
-    const data = await res.json();
+    console.log('🔍 Opening debug...');
+    var res = await fetch(API_BASE + '/api/debug/ha');
+    var data = await res.json();
+    console.log('🐛 Debug data:', data);
     alert(JSON.stringify(data, null, 2));
   }
 
@@ -1172,6 +1165,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     alert('✅ Klaar om nog een dashboard te maken.');
   }
 
+  console.log('🎬 Script loaded, calling init()...');
   init();
 </script>
 </body>

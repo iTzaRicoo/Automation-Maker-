@@ -25,15 +25,16 @@ APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
 
-# ✅ INGRESS FIX: Handle Home Assistant ingress proxy
+# ✅ INGRESS / PROXY FIX: only enable ProxyFix when running under Supervisor (production)
 from werkzeug.middleware.proxy_fix import ProxyFix
-app.wsgi_app = ProxyFix(
-    app.wsgi_app,
-    x_for=1,
-    x_proto=1,
-    x_host=1,
-    x_prefix=1
-)
+if os.environ.get("SUPERVISOR_TOKEN"):
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=1,
+        x_proto=1,
+        x_host=1,
+        x_prefix=1
+    )
 
 # -------------------------
 # Paths
@@ -53,12 +54,12 @@ THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
 DASHBOARD_THEME_FILE = os.path.join(THEMES_PATH, "dashboard_maker.yaml")
 THEME_NAME = "Dashboard Maker"
 
-# --- HA URLs ---
+# --- HA URLs (lokaal eerst testen) ---
 HA_URLS = [
-    "http://supervisor/core",
-    "http://homeassistant:8123",
-    "http://localhost:8123",
     "http://127.0.0.1:8123",
+    "http://localhost:8123",
+    "http://homeassistant:8123",
+    "http://supervisor/core",
 ]
 
 Path(DASHBOARDS_PATH).mkdir(parents=True, exist_ok=True)
@@ -76,12 +77,22 @@ def _read_file(path: str) -> str:
         return ""
 
 def _read_options_json() -> Dict[str, Any]:
+    """Lees add-on opties met uitgebreide foutafhandeling"""
     try:
         if os.path.exists(ADDON_OPTIONS_PATH):
+            print(f"📖 Reading options from: {ADDON_OPTIONS_PATH}")
             with open(ADDON_OPTIONS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
+                content = f.read()
+                print(f"📄 Options.json content: {content[:200]}")
+                data = json.loads(content) or {}
+                print(f"✅ Parsed options: {list(data.keys())}")
+                return data
+        else:
+            print(f"⚠️ Options file not found: {ADDON_OPTIONS_PATH}")
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON parse error in options.json: {e}")
     except Exception as e:
-        print(f"Warning: Could not read options.json: {e}")
+        print(f"❌ Could not read options.json: {e}")
     return {}
 
 def sanitize_filename(name: str) -> str:
@@ -142,7 +153,7 @@ def next_available_filename(base_dir: str, desired: str) -> str:
     return f"{stem}_{int(datetime.now().timestamp())}.yaml"
 
 # -------------------------
-# Token discovery
+# Token discovery (improved)
 # -------------------------
 def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     """
@@ -157,22 +168,33 @@ def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
 
     opts = _read_options_json()
     debug_info["options_json_keys"] = sorted(list(opts.keys()))
+    debug_info["options_json_content"] = str(opts)[:200]
 
-    user_tok = (opts.get("access_token", "") or "").strip()
+    # Eerst env vars
+    user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
     if not user_tok:
-        user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
+        user_tok = (opts.get("access_token", "") or "").strip()
+
+    # Alternatieve naam
+    if not user_tok:
+        user_tok = (opts.get("ha_token", "") or "").strip()
 
     debug_info["user_token_found"] = bool(user_tok)
     if user_tok:
         debug_info["user_token_length"] = len(user_tok)
         debug_info["user_token_prefix"] = (user_tok[:20] + "...") if len(user_tok) > 20 else user_tok
 
-    sup_tok = (opts.get("supervisor_token", "") or "").strip()
+    sup_tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
     if not sup_tok:
-        sup_tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
+        sup_tok = (opts.get("supervisor_token", "") or "").strip()
 
     if not sup_tok:
-        for p in ["/var/run/supervisor_token", "/run/supervisor_token", "/data/supervisor_token"]:
+        for p in [
+            "/var/run/supervisor_token",
+            "/run/supervisor_token",
+            "/data/supervisor_token",
+            "/supervisor_token",
+        ]:
             debug_info["supervisor_token_files_checked"].append(p)
             sup_tok = _read_file(p)
             if sup_tok:
@@ -232,6 +254,9 @@ class HAConnection:
             h["Authorization"] = f"Bearer {token}"
         return h
 
+    # -------------------------
+    # Test connectie verbeteren
+    # -------------------------
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -249,40 +274,43 @@ class HAConnection:
             r = requests.get(
                 test_url,
                 headers=self._headers(token),
-                timeout=5,
+                timeout=10,  # was 5
                 verify=False
             )
 
             debug["status_code"] = r.status_code
             debug["response_length"] = len(r.text)
+            debug["response_headers"] = dict(r.headers)
 
             if r.status_code == 200:
                 try:
                     data = r.json()
                     debug["response_message"] = data.get("message", "")
-                except Exception:
+                    debug["response_data"] = str(data)[:200]
+                except Exception as e:
+                    debug["json_error"] = str(e)
                     debug["response_text"] = r.text[:200]
                 return True, "OK", debug
 
             if r.status_code == 401:
-                debug["error"] = "Unauthorized"
-                return False, "Unauthorized (401)", debug
+                debug["error"] = "Unauthorized - token werkt niet"
+                return False, "Token ongeldig (401)", debug
             if r.status_code == 403:
-                debug["error"] = "Forbidden"
-                return False, "Forbidden (403)", debug
+                debug["error"] = "Forbidden - geen toegang"
+                return False, "Geen toegang (403)", debug
 
             debug["error"] = f"HTTP {r.status_code}"
-            debug["response_text"] = r.text[:200]
+            debug["response_text"] = r.text[:300]
             return False, f"HTTP {r.status_code}", debug
 
         except requests.exceptions.Timeout:
-            debug["error"] = "Timeout"
+            debug["error"] = "Timeout na 10 seconden"
             return False, "Timeout", debug
         except requests.exceptions.ConnectionError as e:
-            debug["error"] = f"Connection error: {str(e)[:100]}"
+            debug["error"] = f"Connection error: {str(e)[:200]}"
             return False, "Connection refused", debug
         except Exception as e:
-            debug["error"] = f"Exception: {str(e)[:100]}"
+            debug["error"] = f"Exception: {str(e)[:200]}"
             return False, str(e)[:100], debug
 
     def probe(self, force: bool = False) -> Tuple[bool, str]:
@@ -294,11 +322,13 @@ class HAConnection:
 
         attempts: List[Tuple[str, str, str]] = []
 
+        # Prefer user token for all URLs
         if self.user_token:
             for url in HA_URLS:
                 mode = "supervisor" if "supervisor" in url else "direct"
                 attempts.append((url, self.user_token, mode))
 
+        # Supervisor token typically works best with supervisor/core
         if self.supervisor_token:
             for url in HA_URLS:
                 if "supervisor" in url:
@@ -358,7 +388,6 @@ class HAConnection:
         )
 
         if r.status_code in (401, 403):
-            # reset and try once again
             self.active_base_url = None
             self.active_token = None
             self.active_mode = "unknown"
@@ -495,7 +524,6 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
 def ensure_mushroom_resource() -> str:
     """Register Mushroom in Lovelace resources"""
     desired_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
-
     resources = get_lovelace_resources()
 
     for res in resources:
@@ -598,7 +626,7 @@ def try_set_theme_auto() -> str:
     return "Theme geïnstalleerd (activeren niet gelukt)"
 
 # -------------------------
-# ✅ Cruciaal: registreer dashboard in configuration.yaml
+# Register dashboard in configuration.yaml
 # -------------------------
 def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
@@ -646,7 +674,7 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
         return f"Registratie gefaald: {str(e)}"
 
 # -------------------------
-# Dashboard Generator Fix
+# Dashboard Generator (real Mushroom cards)
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     """Generate a real working dashboard with Mushroom cards"""
@@ -706,6 +734,7 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:thermometer"
             })
 
+    # fallback
     if len(cards) == 1 and not (lights or switches or climate or temp_sensors):
         cards.append({
             "type": "markdown",
@@ -994,7 +1023,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       setDot('step2', true);
       setDot('step3', true);
 
-      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\\n') : ''));
+      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
     } catch (e) {
       console.error(e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
@@ -1031,10 +1060,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const adv = document.getElementById('advancedPanel');
       if (!adv.classList.contains('hidden')) {
         document.getElementById('advancedOut').textContent =
-          (data.simple_code || '') + '\\n---\\n' + (data.advanced_code || '');
+          (data.simple_code || '') + '\n---\n' + (data.advanced_code || '');
       }
 
-      alert('✅ Klaar!\\n- ' + data.simple_filename + '\\n- ' + data.advanced_filename);
+      alert('✅ Klaar!\n- ' + data.simple_filename + '\n- ' + data.advanced_filename);
       showStep4();
     } catch (e) {
       console.error(e);
@@ -1363,16 +1392,42 @@ def api_reload_lovelace():
 
     return jsonify({"ok": False, "error": "Vernieuwen lukt niet.", "details": last}), 400
 
+# -------------------------
+# ✅ Debug endpoint (tokens)
+# -------------------------
+@app.route("/api/debug/tokens", methods=["GET"])
+def api_debug_tokens():
+    """Debug endpoint om tokens te controleren"""
+    return jsonify({
+        "options_json_path": ADDON_OPTIONS_PATH,
+        "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
+        "options_json_content": _read_options_json(),
+        "env_vars": {
+            "HOMEASSISTANT_TOKEN": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
+            "SUPERVISOR_TOKEN": bool(os.environ.get("SUPERVISOR_TOKEN")),
+            "HA_CONFIG_PATH": HA_CONFIG_PATH,
+        },
+        "discovered_tokens": TOKEN_DEBUG,
+        "active_connection": {
+            "url": conn.active_base_url,
+            "mode": conn.active_mode,
+            "has_token": bool(conn.active_token),
+        }
+    })
+
 if __name__ == "__main__":
+    port = int(os.environ.get("INGRESS_PORT") or os.environ.get("PORT") or "5001")
+
     print("\n" + "=" * 60)
     print(f"{APP_NAME} starting... ({APP_VERSION})")
     print("=" * 60)
     print("🌐 Starting Flask with ingress support...")
+    print(f"🌐 Listening on 0.0.0.0:{port}")
     print("=" * 60 + "\n")
 
     app.run(
         host="0.0.0.0",
-        port=5001,
+        port=port,
         debug=False,
         threaded=True,
         use_reloader=False

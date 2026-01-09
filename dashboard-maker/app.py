@@ -4,7 +4,7 @@ from __future__ import annotations
 from flask import Flask, request, jsonify, Response
 import os
 import re
-import shutil  # folder operations
+import shutil
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -25,7 +25,7 @@ APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
 
-# ✅ INGRESS / PROXY FIX: only enable ProxyFix when running under Supervisor (production)
+# ✅ ProxyFix alleen in productie (Supervisor context)
 from werkzeug.middleware.proxy_fix import ProxyFix
 if os.environ.get("SUPERVISOR_TOKEN"):
     app.wsgi_app = ProxyFix(
@@ -43,7 +43,7 @@ HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
 DASHBOARDS_PATH = os.environ.get("DASHBOARDS_PATH") or os.path.join(HA_CONFIG_PATH, "dashboards")
 ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
 
-# --- Mushroom install (v5.0.9 archive layout) ---
+# --- Mushroom install (v5.0.9 GitHub archive layout) ---
 MUSHROOM_VERSION = "5.0.9"
 MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"
 WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
@@ -170,12 +170,12 @@ def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     debug_info["options_json_keys"] = sorted(list(opts.keys()))
     debug_info["options_json_content"] = str(opts)[:200]
 
-    # Eerst env vars
+    # ✅ Eerst omgevingsvariabelen proberen
     user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
     if not user_tok:
         user_tok = (opts.get("access_token", "") or "").strip()
 
-    # Alternatieve naam
+    # ✅ Ook "ha_token" proberen (alternatieve naam)
     if not user_tok:
         user_tok = (opts.get("ha_token", "") or "").strip()
 
@@ -254,9 +254,7 @@ class HAConnection:
             h["Authorization"] = f"Bearer {token}"
         return h
 
-    # -------------------------
-    # Test connectie verbeteren
-    # -------------------------
+    # ✅ Test connectie verbeteren
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -274,7 +272,7 @@ class HAConnection:
             r = requests.get(
                 test_url,
                 headers=self._headers(token),
-                timeout=10,  # was 5
+                timeout=10,
                 verify=False
             )
 
@@ -322,13 +320,11 @@ class HAConnection:
 
         attempts: List[Tuple[str, str, str]] = []
 
-        # Prefer user token for all URLs
         if self.user_token:
             for url in HA_URLS:
                 mode = "supervisor" if "supervisor" in url else "direct"
                 attempts.append((url, self.user_token, mode))
 
-        # Supervisor token typically works best with supervisor/core
         if self.supervisor_token:
             for url in HA_URLS:
                 if "supervisor" in url:
@@ -467,7 +463,7 @@ def safe_get_states() -> List[Dict[str, Any]]:
         return []
 
 # -------------------------
-# Mushroom install + resources (v5.0.9)
+# Mushroom install + resources
 # -------------------------
 def mushroom_installed() -> bool:
     """Check if Mushroom is properly installed"""
@@ -489,7 +485,7 @@ def download_and_extract_zip(url: str, target_dir: str):
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         z.extractall(target_dir)
 
-    # GitHub archive creates folder like 'lovelace-mushroom-5.0.9/'
+    # GitHub archive folder like 'lovelace-mushroom-5.0.9/'
     for item in os.listdir(target_dir):
         if item.startswith("lovelace-mushroom-"):
             old_path = os.path.join(target_dir, item)
@@ -530,8 +526,6 @@ def ensure_mushroom_resource() -> str:
         res_url = (res.get("url", "") or "")
         if res_url == desired_url:
             return "Mushroom resource staat goed"
-        if "mushroom" in res_url.lower() and res_url != desired_url:
-            print(f"Found existing Mushroom-like resource: {res_url} (will add new path too)")
 
     payload = {"type": "module", "url": desired_url}
     try:
@@ -734,7 +728,6 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:thermometer"
             })
 
-    # fallback
     if len(cards) == 1 and not (lights or switches or climate or temp_sensors):
         cards.append({
             "type": "markdown",
@@ -756,7 +749,7 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     }
 
 # -------------------------
-# HTML Wizard
+# HTML Wizard (Ingress-proof JS: uses ./api/...)
 # -------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="nl">
@@ -766,9 +759,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <title>__APP_NAME__</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
+
 <body class="bg-gradient-to-br from-slate-50 to-indigo-50 min-h-screen p-4">
   <div class="max-w-5xl mx-auto">
     <div class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 mb-6">
+
       <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 class="text-3xl sm:text-4xl font-bold text-indigo-900">🧩 __APP_NAME__</h1>
@@ -781,12 +776,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <span>Verbinden…</span>
           </div>
           <div class="flex gap-2 flex-wrap">
-            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
-            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🧾 Debug</button>
+            <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+              🔄 Vernieuwen
+            </button>
+            <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">
+              🧾 Debug
+            </button>
           </div>
         </div>
       </div>
 
+      <!-- Progress -->
       <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 mb-6">
         <div class="flex items-center justify-between text-sm font-semibold">
           <div id="step1Dot" class="flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-indigo-500 inline-block"></span> Stap 1</div>
@@ -799,6 +799,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Step 1 -->
       <div id="step1" class="border border-slate-200 rounded-2xl p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -847,10 +848,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <button onclick="runSetup()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
             🚀 Alles automatisch instellen
           </button>
-          <div class="text-sm text-slate-500 flex items-center"><span id="setupHint">Klik één keer. Wij doen de rest.</span></div>
+          <div class="text-sm text-slate-500 flex items-center">
+            <span id="setupHint">Klik één keer. Wij doen de rest.</span>
+          </div>
         </div>
       </div>
 
+      <!-- Step 2 -->
       <div id="step2" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -867,6 +871,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Step 3 -->
       <div id="step3" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -902,6 +907,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Step 4 -->
       <div id="step4" class="border border-slate-200 rounded-2xl p-5 mt-4 hidden">
         <div class="flex items-start justify-between gap-4">
           <div>
@@ -930,7 +936,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
 <script>
-  const API_BASE = window.location.pathname.replace(/\/$/, '');
+  // ✅ Ingress-proof: use relative base so calls hit THIS add-on, not HA core
+  const API_BASE = '.';
 
   function setStatus(text, color = 'gray') {
     document.getElementById('status').innerHTML =
@@ -968,9 +975,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function init() {
     setStatus('Verbinden…', 'yellow');
+    console.log('🔍 Starting init...');
     try {
+      console.log('📡 Fetching', API_BASE + '/api/config');
       const cfgRes = await fetch(API_BASE + '/api/config');
+      console.log('📥 Response status:', cfgRes.status);
       const cfg = await cfgRes.json();
+      console.log('📦 Config data:', cfg);
 
       if (cfg.ha_ok) {
         setStatus('Verbonden (' + (cfg.active_mode || 'ok') + ')', 'green');
@@ -978,6 +989,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       } else {
         setStatus('Geen verbinding', 'red');
         setCheck('chkEngine', false, cfg.ha_message || 'Geen verbinding');
+        console.error('❌ HA connection failed:', cfg.ha_message);
       }
 
       setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
@@ -985,9 +997,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       setDot('step1', true);
     } catch (e) {
-      console.error(e);
+      console.error('❌ Init error:', e);
       setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden');
+      setCheck('chkEngine', false, 'Kan niet verbinden: ' + e.message);
       setCheck('chkCards', false, 'Kan niet verbinden');
       setCheck('chkStyle', false, 'Kan niet verbinden');
     }
@@ -997,19 +1009,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const preset = document.getElementById('preset').value;
     const density = document.getElementById('density').value;
 
+    console.log('🚀 Starting setup...', { preset, density });
     document.getElementById('setupHint').textContent = 'Bezig… (Mushroom + theme + auto licht/donker)';
     setCheck('chkCards', true, 'Bezig…');
     setCheck('chkStyle', true, 'Bezig…');
 
     try {
+      console.log('📡 Posting to', API_BASE + '/api/setup');
       const res = await fetch(API_BASE + '/api/setup', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ preset, density })
       });
+
+      console.log('📥 Setup response status:', res.status);
       const data = await res.json();
+      console.log('📦 Setup data:', data);
 
       if (!res.ok || !data.ok) {
+        console.error('❌ Setup failed:', data);
         document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
         return alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
       }
@@ -1025,9 +1043,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
     } catch (e) {
-      console.error(e);
+      console.error('❌ Setup error:', e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-      alert('❌ Instellen mislukt.');
+      alert('❌ Instellen mislukt: ' + e.message);
     }
   }
 
@@ -1040,7 +1058,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       showStep4();
     } catch (e) {
       console.error(e);
-      alert('❌ Demo mislukt.');
+      alert('❌ Demo mislukt: ' + e.message);
     }
   }
 
@@ -1067,12 +1085,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
       showStep4();
     } catch (e) {
       console.error(e);
-      alert('❌ Maken mislukt.');
+      alert('❌ Maken mislukt: ' + e.message);
     }
   }
 
   async function reloadDashboards() {
-    try { await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' }); } catch (e) {}
+    try {
+      await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' });
+      alert('🔄 Dashboard reload gestart!');
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   function toggleAdvanced() {
@@ -1392,12 +1415,9 @@ def api_reload_lovelace():
 
     return jsonify({"ok": False, "error": "Vernieuwen lukt niet.", "details": last}), 400
 
-# -------------------------
-# ✅ Debug endpoint (tokens)
-# -------------------------
+# ✅ Debug endpoint om tokens te controleren
 @app.route("/api/debug/tokens", methods=["GET"])
 def api_debug_tokens():
-    """Debug endpoint om tokens te controleren"""
     return jsonify({
         "options_json_path": ADDON_OPTIONS_PATH,
         "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),

@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify, Response
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -13,20 +14,17 @@ import yaml
 import zipfile
 import io
 import json
-import time
 
-# -------------------------
-# SSL Warning Fix
-# -------------------------
+# SSL warning fix
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.9"
 APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
 
-# ✅ ProxyFix alleen in productie (Supervisor context)
+# ✅ INGRESS FIX: Handle Home Assistant ingress proxy (alleen in productie / Supervisor)
 from werkzeug.middleware.proxy_fix import ProxyFix
 if os.environ.get("SUPERVISOR_TOKEN"):
     app.wsgi_app = ProxyFix(
@@ -41,10 +39,17 @@ if os.environ.get("SUPERVISOR_TOKEN"):
 # Paths
 # -------------------------
 HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
-DASHBOARDS_PATH = os.environ.get("DASHBOARDS_PATH") or os.path.join(HA_CONFIG_PATH, "dashboards")
+
+# Support both env var names (user had DASHBOARD_PATH in run.sh)
+DASHBOARDS_PATH = (
+    os.environ.get("DASHBOARDS_PATH")
+    or os.environ.get("DASHBOARD_PATH")
+    or os.path.join(HA_CONFIG_PATH, "dashboards")
+)
+
 ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
 
-# --- Mushroom install (v5.0.9 GitHub archive layout) ---
+# --- Mushroom install ---
 MUSHROOM_VERSION = "5.0.9"
 MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"
 WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
@@ -154,9 +159,12 @@ def next_available_filename(base_dir: str, desired: str) -> str:
     return f"{stem}_{int(datetime.now().timestamp())}.yaml"
 
 # -------------------------
-# Token discovery (improved)
+# Token discovery
 # -------------------------
 def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
+    """
+    Returns (user_token, supervisor_token, debug_info)
+    """
     debug_info: Dict[str, Any] = {
         "addon_options_exists": os.path.exists(ADDON_OPTIONS_PATH),
         "env_homeassistant_token": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
@@ -168,6 +176,7 @@ def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
     debug_info["options_json_keys"] = sorted(list(opts.keys()))
     debug_info["options_json_content"] = str(opts)[:200]
 
+    # ✅ Eerst omgevingsvariabelen proberen
     user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
     if not user_tok:
         user_tok = (opts.get("access_token", "") or "").strip()
@@ -207,13 +216,8 @@ print(f"{'='*60}")
 print(f"Config path: {HA_CONFIG_PATH}")
 print(f"Dashboards path: {DASHBOARDS_PATH}")
 print(f"Options.json: {ADDON_OPTIONS_PATH}")
-print(f"  - Exists: {TOKEN_DEBUG.get('addon_options_exists')}")
-print(f"  - Keys: {TOKEN_DEBUG.get('options_json_keys')}")
 print(f"\nToken Status:")
 print(f"  - User token (LLAT): {'✓ Found' if USER_TOKEN else '✗ NOT FOUND'}")
-if USER_TOKEN:
-    print(f"    Length: {TOKEN_DEBUG.get('user_token_length')}")
-    print(f"    Prefix: {TOKEN_DEBUG.get('user_token_prefix')}")
 print(f"  - Supervisor token: {'✓ Found' if SUPERVISOR_TOKEN else '✗ NOT FOUND'}")
 print(f"\nWill try these HA URLs in order:")
 for url in HA_URLS:
@@ -392,6 +396,7 @@ class HAConnection:
                     timeout=timeout,
                     verify=False
                 )
+
         return r
 
 conn = HAConnection()
@@ -416,8 +421,7 @@ def get_states() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/states", timeout=12)
         if r.status_code != 200:
             return []
-        data = r.json()
-        return data if isinstance(data, list) else []
+        return r.json()
     except Exception:
         return []
 
@@ -426,8 +430,7 @@ def get_area_registry() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/config/area_registry", timeout=12)
         if r.status_code != 200:
             return []
-        data = r.json()
-        return data if isinstance(data, list) else []
+        return r.json()
     except Exception:
         return []
 
@@ -436,16 +439,20 @@ def get_entity_registry() -> List[Dict[str, Any]]:
         r = conn.request("GET", "/api/config/entity_registry", timeout=12)
         if r.status_code != 200:
             return []
-        data = r.json()
-        return data if isinstance(data, list) else []
+        return r.json()
     except Exception:
         return []
 
 def safe_get_states() -> List[Dict[str, Any]]:
+    """Safely get states with fallback"""
     try:
         states = get_states()
         if not states:
-            return [{"entity_id": "sun.sun", "state": "above_horizon", "attributes": {}}]
+            return [{
+                "entity_id": "sun.sun",
+                "state": "above_horizon",
+                "attributes": {}
+            }]
         return states
     except Exception as e:
         print(f"Error getting states: {e}")
@@ -455,6 +462,7 @@ def safe_get_states() -> List[Dict[str, Any]]:
 # Mushroom install + resources
 # -------------------------
 def mushroom_installed() -> bool:
+    # Check multiple possible locations for the dist folder
     possible_paths = [
         os.path.join(MUSHROOM_PATH, "dist"),
         os.path.join(MUSHROOM_PATH, "build"),
@@ -465,7 +473,7 @@ def mushroom_installed() -> bool:
         if os.path.exists(check_path):
             try:
                 all_files: List[str] = []
-                for root, _dirs, files in os.walk(check_path):
+                for _root, _dirs, files in os.walk(check_path):
                     all_files.extend([f for f in files if f.endswith(".js")])
                 if all_files:
                     print(f"✓ Mushroom JS gevonden: {len(all_files)} files in {check_path}")
@@ -481,10 +489,12 @@ def download_and_extract_zip(url: str, target_dir: str):
     r.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        # Extract to temp location first
         temp_extract = os.path.join(target_dir, "_temp_extract")
         os.makedirs(temp_extract, exist_ok=True)
         z.extractall(temp_extract)
 
+    # Find the extracted folder
     extracted_items = os.listdir(temp_extract)
     if not extracted_items:
         shutil.rmtree(temp_extract)
@@ -493,9 +503,11 @@ def download_and_extract_zip(url: str, target_dir: str):
     source_folder = os.path.join(temp_extract, extracted_items[0])
     final_path = os.path.join(target_dir, "lovelace-mushroom")
 
+    # Remove old install if exists
     if os.path.exists(final_path):
         shutil.rmtree(final_path)
 
+    # Move to final location
     shutil.move(source_folder, final_path)
     shutil.rmtree(temp_extract)
 
@@ -507,8 +519,8 @@ def install_mushroom() -> str:
         return "Mushroom kaarten zijn al geïnstalleerd"
     download_and_extract_zip(MUSHROOM_GITHUB_ZIP, WWW_COMMUNITY)
     if not mushroom_installed():
-        raise RuntimeError("Mushroom install faalde: geen .js bestanden gevonden.")
-    return "Mushroom kaarten geïnstalleerd (v5.0.9)"
+        raise RuntimeError("Mushroom install faalde: geen JS bestanden gevonden.")
+    return "Mushroom kaarten geïnstalleerd"
 
 def get_lovelace_resources() -> List[Dict[str, Any]]:
     try:
@@ -521,16 +533,20 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
         return []
 
 def ensure_mushroom_resource() -> str:
+    # Try local install first
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
+    # Fallback to CDN
     cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
 
     resources = get_lovelace_resources()
 
+    # Check if already registered
     for res in resources:
-        url = res.get("url", "")
-        if local_url in url or "mushroom" in url:
+        url = (res.get("url", "") or "")
+        if local_url in url or "mushroom" in url.lower():
             return "Mushroom resource staat goed"
 
+    # Try local first, then CDN
     for url_to_try in [local_url, cdn_url]:
         payload = {"type": "module", "url": url_to_try}
         try:
@@ -552,6 +568,7 @@ THEME_PRESETS = {
     "emerald_fresh": {"label": "Emerald Fresh", "primary": "#10b981", "accent": "#34d399"},
     "amber_warm": {"label": "Amber Warm", "primary": "#f59e0b", "accent": "#f97316"},
     "rose_neon": {"label": "Rose Neon", "primary": "#f43f5e", "accent": "#fb7185"},
+    "midnight_pro": {"label": "Midnight Pro", "primary": "#0ea5e9", "accent": "#a78bfa"},
 }
 
 def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
@@ -627,46 +644,116 @@ def try_set_theme_auto() -> str:
     return "Theme geïnstalleerd (activeren niet gelukt)"
 
 # -------------------------
-# Fix 1: Improved register_dashboard_in_lovelace (mode: yaml + unique key)
+# configuration.yaml helpers
 # -------------------------
-def register_dashboard_in_lovelace(filename: str, title: str) -> str:
+def backup_configuration_yaml() -> Optional[str]:
+    """Maak backup van configuration.yaml"""
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    if not os.path.exists(config_yaml_path):
+        return None
+
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(HA_CONFIG_PATH, f"configuration.yaml.backup_{timestamp}")
+        shutil.copy2(config_yaml_path, backup_path)
+        print(f"💾 Backup gemaakt: {backup_path}")
+        return backup_path
+    except Exception as e:
+        print(f"⚠️ Backup gefaald: {e}")
+        return None
+
+def ensure_lovelace_config() -> Tuple[bool, str]:
+    """Zorgt dat lovelace config correct staat in configuration.yaml"""
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    backup_path = None
 
     if os.path.exists(config_yaml_path):
         try:
             with open(config_yaml_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
+                content = f.read()
+                config = yaml.safe_load(content) or {}
         except Exception as e:
-            print(f"Warning: Could not read configuration.yaml: {e}")
-            config = {}
+            return False, f"Kan configuration.yaml niet lezen: {e}"
     else:
         config = {}
+        content = ""
 
     if not isinstance(config, dict):
         config = {}
 
     lovelace = config.get("lovelace")
+    needs_update = False
+
     if not isinstance(lovelace, dict):
-        lovelace = {}
-    config["lovelace"] = lovelace
+        if not backup_path and os.path.exists(config_yaml_path):
+            backup_path = backup_configuration_yaml()
 
-    # ✅ yaml mode (niet storage)
-    lovelace["mode"] = "yaml"
+        lovelace = {"mode": "yaml", "dashboards": {}}
+        config["lovelace"] = lovelace
+        needs_update = True
+        print("➕ Lovelace sectie toegevoegd aan configuration.yaml")
+    else:
+        if lovelace.get("mode") != "yaml":
+            if not backup_path and os.path.exists(config_yaml_path):
+                backup_path = backup_configuration_yaml()
 
-    dashboards = lovelace.get("dashboards")
+            lovelace["mode"] = "yaml"
+            needs_update = True
+            print("✏️ Lovelace mode aangepast naar 'yaml'")
+
+        if not isinstance(lovelace.get("dashboards"), dict):
+            lovelace["dashboards"] = {}
+            needs_update = True
+            print("➕ Dashboards sectie toegevoegd")
+
+    if needs_update:
+        try:
+            with open(config_yaml_path, "w", encoding="utf-8") as f:
+                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+            msg = "✅ configuration.yaml bijgewerkt"
+            if backup_path:
+                msg += f" (backup: {os.path.basename(backup_path)})"
+            print(msg)
+            return True, msg
+        except Exception as e:
+            return False, f"Kan configuration.yaml niet schrijven: {e}"
+
+    return True, "Lovelace config al correct"
+
+def register_dashboard_in_lovelace(filename: str, title: str) -> str:
+    """Registreer dashboard in configuration.yaml met auto-setup van lovelace sectie"""
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    ok, msg = ensure_lovelace_config()
+    if not ok:
+        return f"Config setup gefaald: {msg}"
+
+    try:
+        with open(config_yaml_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except Exception as e:
+        return f"Kan configuration.yaml niet lezen: {e}"
+
+    if not isinstance(config, dict):
+        config = {}
+
+    lovelace = config.get("lovelace", {})
+    dashboards = lovelace.get("dashboards", {})
     if not isinstance(dashboards, dict):
         dashboards = {}
-    lovelace["dashboards"] = dashboards
 
-    dashboard_key = filename.replace(".yaml", "").replace("_", "-").replace(" ", "-").lower()
-    dashboard_key = re.sub(r"-?\d+$", "", dashboard_key)
-    if not dashboard_key:
-        dashboard_key = "dashboard"
+    base_key = filename.replace(".yaml", "").replace("_", "-").replace(" ", "-").lower()
+    base_key = re.sub(r"-?\d+$", "", base_key)
+    if not base_key or base_key in ["dashboard", "dashboards"]:
+        base_key = "dash"
 
-    original_key = dashboard_key
+    dashboard_key = base_key
     counter = 1
     while dashboard_key in dashboards:
-        dashboard_key = f"{original_key}-{counter}"
+        dashboard_key = f"{base_key}-{counter}"
         counter += 1
 
     dashboards[dashboard_key] = {
@@ -677,20 +764,76 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
         "filename": f"dashboards/{filename}",
     }
 
+    lovelace["dashboards"] = dashboards
+    config["lovelace"] = lovelace
+
     try:
         with open(config_yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-        print(f"✅ Dashboard registered: {dashboard_key} -> {title}")
-        return f"Dashboard geregistreerd als '{dashboard_key}'"
+        print(f"✅ Dashboard geregistreerd: {dashboard_key} -> {title}")
+        print(f"   📁 Bestand: dashboards/{filename}")
+        print(f"   📌 Sidebar: enabled")
+        return f"Dashboard '{title}' geregistreerd als '{dashboard_key}'"
     except Exception as e:
-        print(f"❌ Failed to write configuration.yaml: {e}")
-        return f"Registratie gefaald: {str(e)}"
+        return f"Schrijven gefaald: {e}"
+
+def validate_configuration_yaml() -> Tuple[bool, str, Dict[str, Any]]:
+    """Valideer configuration.yaml structuur"""
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    result: Dict[str, Any] = {
+        "exists": False,
+        "readable": False,
+        "valid_yaml": False,
+        "has_lovelace": False,
+        "lovelace_mode": None,
+        "dashboard_count": 0,
+        "errors": [],
+    }
+
+    if not os.path.exists(config_yaml_path):
+        result["errors"].append("configuration.yaml bestaat niet")
+        return False, "Configuration.yaml niet gevonden", result
+
+    result["exists"] = True
+
+    try:
+        with open(config_yaml_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        result["readable"] = True
+    except Exception as e:
+        result["errors"].append(f"Niet leesbaar: {e}")
+        return False, "Kan configuration.yaml niet lezen", result
+
+    try:
+        config = yaml.safe_load(content) or {}
+        result["valid_yaml"] = True
+    except Exception as e:
+        result["errors"].append(f"Ongeldige YAML: {e}")
+        return False, "Ongeldige YAML syntax", result
+
+    if isinstance(config.get("lovelace"), dict):
+        result["has_lovelace"] = True
+        lovelace = config["lovelace"]
+        result["lovelace_mode"] = lovelace.get("mode")
+        if isinstance(lovelace.get("dashboards"), dict):
+            result["dashboard_count"] = len(lovelace["dashboards"])
+
+    if not result["has_lovelace"]:
+        return False, "Lovelace sectie ontbreekt", result
+
+    if result["lovelace_mode"] != "yaml":
+        result["errors"].append(f"Lovelace mode is '{result['lovelace_mode']}' (moet 'yaml' zijn)")
+        return False, "Lovelace mode niet correct", result
+
+    return True, "Configuration.yaml is correct", result
 
 # -------------------------
-# Dashboard generators
+# Dashboard builders
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
+    """Bouwt een volledig dashboard met ALLE beschikbare Mushroom kaarten"""
     states = safe_get_states()
     _areas = get_area_registry()
 
@@ -713,16 +856,11 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
         "subtitle": "{{ now().strftime('%d %B %Y • %H:%M') }}"
     })
 
-    chips: List[Dict[str, Any]] = []
+    chips = []
     if persons:
         chips.append({"type": "entity", "entity": persons[0]["entity_id"], "use_entity_picture": True})
     if lights:
-        chips.append({
-            "type": "template",
-            "entity": lights[0]["entity_id"],
-            "icon": "mdi:lightbulb",
-            "tap_action": {"action": "toggle"}
-        })
+        chips.append({"type": "template", "entity": lights[0]["entity_id"], "icon": "mdi:lightbulb", "tap_action": {"action": "toggle"}})
     if chips:
         cards.append({"type": "custom:mushroom-chips-card", "chips": chips, "alignment": "center"})
 
@@ -846,6 +984,7 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     }
 
 def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
+    """Bouwt een demo dashboard met ALLE Mushroom kaart types"""
     states = safe_get_states()
 
     lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
@@ -859,10 +998,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
     persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
     vacuums = [e for e in states if (e.get("entity_id", "") or "").startswith("vacuum.")]
     alarms = [e for e in states if (e.get("entity_id", "") or "").startswith("alarm_control_panel.")]
-    numbers = [e for e in states if (e.get("entity_id", "") or "").startswith("number.")]
-    selects = [e for e in states if (e.get("entity_id", "") or "").startswith("select.")]
-    updates = [e for e in states if (e.get("entity_id", "") or "").startswith("update.")]
-    weather_entities = [e for e in states if (e.get("entity_id", "") or "").startswith("weather.")]
 
     cards: List[Dict[str, Any]] = []
 
@@ -872,6 +1007,7 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
         "subtitle": "Showcase van alle Mushroom kaarten • {{ now().strftime('%d %B %Y') }}"
     })
 
+    # Chips
     chips: List[Dict[str, Any]] = []
     if lights:
         chips.append({
@@ -887,13 +1023,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
             "entity": persons[0]["entity_id"],
             "icon": "mdi:account",
             "use_entity_picture": True
-        })
-    if weather_entities:
-        chips.append({
-            "type": "weather",
-            "entity": weather_entities[0]["entity_id"],
-            "show_temperature": True,
-            "show_conditions": True
         })
     if chips:
         cards.append({
@@ -913,7 +1042,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "show_color_control": True,
                 "show_color_temp_control": True,
                 "collapsible_controls": True,
-                "icon": "mdi:lightbulb",
                 "tap_action": {"action": "toggle"},
                 "hold_action": {"action": "more-info"}
             })
@@ -925,8 +1053,7 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "type": "custom:mushroom-climate-card",
                 "entity": c["entity_id"],
                 "show_temperature_control": True,
-                "collapsible_controls": True,
-                "icon": "mdi:thermostat"
+                "collapsible_controls": True
             })
 
     if covers:
@@ -948,8 +1075,7 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "entity": fan["entity_id"],
                 "show_percentage_control": True,
                 "show_oscillate_control": True,
-                "collapsible_controls": True,
-                "icon": "mdi:fan"
+                "collapsible_controls": True
             })
 
     if locks:
@@ -957,8 +1083,7 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
         for lock in locks[:3]:
             cards.append({
                 "type": "custom:mushroom-lock-card",
-                "entity": lock["entity_id"],
-                "icon": "mdi:lock"
+                "entity": lock["entity_id"]
             })
 
     if media_players:
@@ -969,8 +1094,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "entity": mp["entity_id"],
                 "use_media_info": True,
                 "show_volume_level": True,
-                "media_controls": ["on_off", "play_pause_stop", "previous", "next"],
-                "volume_controls": ["volume_buttons", "volume_set"],
                 "collapsible_controls": True
             })
 
@@ -980,7 +1103,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
             cards.append({
                 "type": "custom:mushroom-person-card",
                 "entity": person["entity_id"],
-                "icon": "mdi:account",
                 "use_entity_picture": True
             })
 
@@ -991,7 +1113,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "type": "custom:mushroom-vacuum-card",
                 "entity": vacuum["entity_id"],
                 "commands": ["start_pause", "stop", "locate", "clean_spot", "return_home"],
-                "icon": "mdi:robot-vacuum"
             })
 
     if alarms:
@@ -1009,31 +1130,18 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
             cards.append({
                 "type": "custom:mushroom-entity-card",
                 "entity": sw["entity_id"],
-                "icon": "mdi:power-plug",
                 "tap_action": {"action": "toggle"}
             })
 
-    temp_sensors = [s for s in sensors if "temperature" in s.get("entity_id", "").lower()]
-    humidity_sensors = [s for s in sensors if "humidity" in s.get("entity_id", "").lower()]
+    temp_sensors = [s for s in sensors if "temperature" in (s.get("entity_id", "").lower())]
+    humidity_sensors = [s for s in sensors if "humidity" in (s.get("entity_id", "").lower())]
 
     if temp_sensors or humidity_sensors:
         cards.append({"type": "custom:mushroom-title-card", "title": "📊 Sensoren", "subtitle": "Entity cards voor metingen"})
         for temp in temp_sensors[:3]:
-            cards.append({
-                "type": "custom:mushroom-entity-card",
-                "entity": temp["entity_id"],
-                "icon": "mdi:thermometer",
-                "primary_info": "name",
-                "secondary_info": "state"
-            })
+            cards.append({"type": "custom:mushroom-entity-card", "entity": temp["entity_id"], "icon": "mdi:thermometer"})
         for hum in humidity_sensors[:3]:
-            cards.append({
-                "type": "custom:mushroom-entity-card",
-                "entity": hum["entity_id"],
-                "icon": "mdi:water-percent",
-                "primary_info": "name",
-                "secondary_info": "state"
-            })
+            cards.append({"type": "custom:mushroom-entity-card", "entity": hum["entity_id"], "icon": "mdi:water-percent"})
 
     cards.append({"type": "custom:mushroom-title-card", "title": "✨ Template Cards", "subtitle": "Dynamische custom content"})
     cards.append({
@@ -1041,52 +1149,13 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
         "primary": "Welkom thuis!",
         "secondary": "{{ now().strftime('%H:%M') }}",
         "icon": "mdi:home-assistant",
-        "icon_color": "blue",
-        "badge_icon": "mdi:check",
-        "badge_color": "green",
         "tap_action": {"action": "none"}
     })
-
-    if numbers:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔢 Nummers", "subtitle": "Number input cards"})
-        for num in numbers[:2]:
-            cards.append({
-                "type": "custom:mushroom-number-card",
-                "entity": num["entity_id"],
-                "icon": "mdi:numeric",
-                "display_mode": "slider"
-            })
-
-    if selects:
-        cards.append({"type": "custom:mushroom-title-card", "title": "📝 Selecties", "subtitle": "Select dropdown cards"})
-        for sel in selects[:2]:
-            cards.append({
-                "type": "custom:mushroom-select-card",
-                "entity": sel["entity_id"],
-                "icon": "mdi:format-list-bulleted"
-            })
-
-    if updates:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔄 Updates", "subtitle": "Update cards"})
-        for upd in updates[:2]:
-            cards.append({
-                "type": "custom:mushroom-update-card",
-                "entity": upd["entity_id"],
-                "icon": "mdi:package-up",
-                "show_buttons_control": True
-            })
 
     if len(cards) <= 2:
         cards.append({
             "type": "markdown",
-            "content": f"""
-# 🎨 {dashboard_title}
-
-Dit is een **demo dashboard** dat alle Mushroom kaart types laat zien!
-
-## 🚀 Volgende stap
-Maak je eigen dashboard via **Stap 3**!
-            """.strip()
+            "content": f"# 🎨 {dashboard_title}\n\n✅ Demo dashboard aangemaakt.\n\nMaak je eigen dashboard via Stap 3."
         })
 
     return {
@@ -1105,9 +1174,9 @@ Maak je eigen dashboard via **Stap 3**!
     }
 
 # -------------------------
-# HTML Wizard (Fix 4 + Fix 5)
+# HTML Wizard (fixed fetch paths + extra buttons + init lovelace UI)
 # -------------------------
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
@@ -1166,6 +1235,7 @@ HTML_PAGE = """<!DOCTYPE html>
               <option value="emerald_fresh">Emerald Fresh</option>
               <option value="amber_warm">Amber Warm</option>
               <option value="rose_neon">Rose Neon</option>
+              <option value="midnight_pro">Midnight Pro</option>
             </select>
           </div>
 
@@ -1199,6 +1269,19 @@ HTML_PAGE = """<!DOCTYPE html>
           </button>
           <div class="text-sm text-slate-500 flex items-center"><span id="setupHint">Klik één keer. Wij doen de rest.</span></div>
         </div>
+
+        <div class="mt-3 text-sm text-slate-500">
+          <details class="cursor-pointer">
+            <summary class="font-semibold hover:text-slate-700">⚙️ Geavanceerde opties</summary>
+            <div class="mt-2 space-y-2">
+              <button onclick="initLovelace()" class="w-full text-left bg-slate-50 border border-slate-200 px-3 py-2 rounded-lg hover:bg-slate-100 text-sm">
+                🔧 Initialiseer Lovelace Config
+                <div class="text-xs text-slate-500 mt-1">Voegt lovelace sectie toe aan configuration.yaml</div>
+              </button>
+            </div>
+          </details>
+        </div>
+
       </div>
 
       <div id="step2" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
@@ -1280,8 +1363,7 @@ HTML_PAGE = """<!DOCTYPE html>
   </div>
 
 <script>
-  // ✅ INGRESS FIX
-  var API_BASE = '.';
+  const API_BASE = '';
 
   function setStatus(text, color) {
     color = color || 'gray';
@@ -1321,7 +1403,7 @@ HTML_PAGE = """<!DOCTYPE html>
   async function init() {
     setStatus('Verbinden…', 'yellow');
     try {
-      var cfgRes = await fetch(API_BASE + '/api/config');
+      var cfgRes = await fetch('/api/config');
       var cfg = await cfgRes.json();
 
       if (cfg.ha_ok) {
@@ -1339,9 +1421,34 @@ HTML_PAGE = """<!DOCTYPE html>
     } catch (e) {
       console.error(e);
       setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden');
+      setCheck('chkEngine', false, 'Kan niet verbinden: ' + (e.message || ''));
       setCheck('chkCards', false, 'Kan niet verbinden');
       setCheck('chkStyle', false, 'Kan niet verbinden');
+    }
+  }
+
+  async function initLovelace() {
+    if (!confirm('Dit voegt de lovelace configuratie toe aan configuration.yaml.\n\nEr wordt automatisch een backup gemaakt.\n\nDoorgaan?')) {
+      return;
+    }
+
+    try {
+      setStatus('Lovelace initialiseren...', 'yellow');
+      var res = await fetch('/api/init_lovelace', { method: 'POST' });
+      var data = await res.json();
+
+      if (!res.ok || !data.success) {
+        alert('❌ Initialisatie mislukt: ' + (data.error || 'Onbekend'));
+        setStatus('Initialisatie mislukt', 'red');
+        return;
+      }
+
+      setStatus('Lovelace geïnitialiseerd', 'green');
+      alert('✅ Lovelace configuratie toegevoegd!\n\n' + data.message + '\n\nPad: ' + data.config_path);
+    } catch (e) {
+      console.error(e);
+      setStatus('Initialisatie mislukt', 'red');
+      alert('❌ Initialisatie mislukt.');
     }
   }
 
@@ -1354,11 +1461,12 @@ HTML_PAGE = """<!DOCTYPE html>
     setCheck('chkStyle', true, 'Bezig…');
 
     try {
-      var res = await fetch(API_BASE + '/api/setup', {
+      var res = await fetch('/api/setup', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ preset: preset, density: density })
       });
+
       var data = await res.json();
 
       if (!res.ok || !data.ok) {
@@ -1376,19 +1484,18 @@ HTML_PAGE = """<!DOCTYPE html>
       setDot('step2', true);
       setDot('step3', true);
 
-      alert('✅ Setup klaar!\\n\\n' + (data.steps ? data.steps.join('\\n') : ''));
+      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
     } catch (e) {
       console.error(e);
       document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-      alert('❌ Instellen mislukt.');
+      alert('❌ Instellen mislukt: ' + (e.message || ''));
     }
   }
 
-  // ✅ Fix 4: UI feedback demo + reload instructie
   async function createDemo() {
     try {
       setStatus('Demo maken...', 'yellow');
-      var res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
+      var res = await fetch('/api/create_demo', { method: 'POST' });
       var data = await res.json();
       if (!res.ok || !data.success) {
         alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
@@ -1397,14 +1504,14 @@ HTML_PAGE = """<!DOCTYPE html>
       }
       setStatus('Demo gereed!', 'green');
 
-      var msg = '✅ Demo dashboard aangemaakt!\\n\\n';
-      msg += '📁 Bestand: ' + data.filename + '\\n';
-      msg += '📌 Titel: WOW Demo Dashboard\\n\\n';
-      msg += '🔄 BELANGRIJK:\\n';
-      msg += '1. Wacht 5 seconden\\n';
-      msg += '2. Druk op F5 (of refresh je browser)\\n';
-      msg += '3. Check je sidebar voor het nieuwe dashboard\\n\\n';
-      msg += '💡 Zie je het niet? Klik op "🔍 Dashboard Check" of open /api/debug/dashboards';
+      var msg = '✅ Demo dashboard aangemaakt!\n\n';
+      msg += '📁 Bestand: ' + data.filename + '\n';
+      msg += '📌 Titel: WOW Demo Dashboard\n\n';
+      msg += '🔄 BELANGRIJK:\n';
+      msg += '1. Wacht 5 seconden\n';
+      msg += '2. Druk op F5 (of refresh je browser)\n';
+      msg += '3. Check je sidebar voor het nieuwe dashboard\n\n';
+      msg += '💡 Zie je het niet? Gebruik "Dashboard Check" of /api/debug/dashboards';
 
       alert(msg);
       showStep4();
@@ -1415,7 +1522,6 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
-  // ✅ Fix 4: UI feedback dashboards + reload instructie
   async function createMine() {
     var base_title = document.getElementById('dashName').value.trim();
     if (!base_title) {
@@ -1425,7 +1531,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
     try {
       setStatus('Dashboards maken...', 'yellow');
-      var res = await fetch(API_BASE + '/api/create_dashboards', {
+      var res = await fetch('/api/create_dashboards', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ base_title: base_title })
@@ -1440,21 +1546,21 @@ HTML_PAGE = """<!DOCTYPE html>
       var adv = document.getElementById('advancedPanel');
       if (!adv.classList.contains('hidden')) {
         document.getElementById('advancedOut').textContent =
-          (data.simple_code || '') + '\\n---\\n' + (data.advanced_code || '');
+          (data.simple_code || '') + '\n---\n' + (data.advanced_code || '');
       }
 
       setStatus('Dashboards gereed!', 'green');
 
-      var msg = '✅ Dashboards aangemaakt!\\n\\n';
-      msg += '📁 Basis: ' + data.simple_filename + '\\n';
-      msg += '📁 Compleet: ' + data.advanced_filename + '\\n\\n';
-      msg += '🔄 BELANGRIJK:\\n';
-      msg += '1. Wacht 5 seconden\\n';
-      msg += '2. Druk op F5 (of refresh je browser)\\n';
-      msg += '3. Check je sidebar voor de nieuwe dashboards\\n\\n';
-      msg += '💡 Zie je ze niet?\\n';
-      msg += '- Ga naar Instellingen > Dashboards\\n';
-      msg += '- Of klik op "🔍 Dashboard Check"';
+      var msg = '✅ Dashboards aangemaakt!\n\n';
+      msg += '📁 Basis: ' + data.simple_filename + '\n';
+      msg += '📁 Compleet: ' + data.advanced_filename + '\n\n';
+      msg += '🔄 BELANGRIJK:\n';
+      msg += '1. Wacht 5 seconden\n';
+      msg += '2. Druk op F5 (of refresh je browser)\n';
+      msg += '3. Check je sidebar voor de nieuwe dashboards\n\n';
+      msg += '💡 Zie je ze niet?\n';
+      msg += '- Ga naar Instellingen > Dashboards\n';
+      msg += '- Of gebruik de debug knop rechtsboven';
 
       alert(msg);
       showStep4();
@@ -1467,7 +1573,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
   async function reloadDashboards() {
     try {
-      await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' });
+      await fetch('/api/reload_lovelace', { method: 'POST' });
       alert('🔄 Dashboard reload gestart!');
     } catch (e) {
       console.error(e);
@@ -1480,11 +1586,13 @@ HTML_PAGE = """<!DOCTYPE html>
 
   function copyAll() {
     var text = document.getElementById('advancedOut').textContent || '';
-    navigator.clipboard.writeText(text).then(function() { alert('📋 Gekopieerd!'); });
+    navigator.clipboard.writeText(text).then(function() {
+      alert('📋 Gekopieerd!');
+    });
   }
 
   async function loadDashboards() {
-    var response = await fetch(API_BASE + '/api/dashboards');
+    var response = await fetch('/api/dashboards');
     var items = await response.json();
 
     var list = document.getElementById('dashboardsList');
@@ -1508,8 +1616,8 @@ HTML_PAGE = """<!DOCTYPE html>
       html += '<div><div class="font-semibold">' + esc(t.name) + '</div>';
       html += '<div class="text-sm text-slate-500 font-mono">' + esc(t.filename) + '</div></div>';
       html += '<div class="flex gap-2 flex-wrap">';
-      html += '<button onclick="downloadDashboard(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
-      html += '<button onclick="deleteDashboard(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
+      html += '<button onclick="downloadDashboard(\'' + t.filename + '\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
+      html += '<button onclick="deleteDashboard(\'' + t.filename + '\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
       html += '</div></div>';
     });
 
@@ -1519,7 +1627,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
   async function deleteDashboard(filename) {
     if (!confirm('Weet je zeker dat je dit dashboard wilt verwijderen?')) return;
-    var response = await fetch(API_BASE + '/api/delete_dashboard', {
+    var response = await fetch('/api/delete_dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: filename })
@@ -1534,34 +1642,33 @@ HTML_PAGE = """<!DOCTYPE html>
   }
 
   async function downloadDashboard(filename) {
-    window.open(API_BASE + '/api/download?filename=' + encodeURIComponent(filename), '_blank');
+    window.open('/api/download?filename=' + encodeURIComponent(filename), '_blank');
   }
 
   async function openDebug() {
-    var res = await fetch(API_BASE + '/api/debug/ha');
+    var res = await fetch('/api/debug/ha');
     var data = await res.json();
     alert(JSON.stringify(data, null, 2));
   }
 
-  // ✅ Fix 5: Dashboard debug knop + endpoint
   async function openDashboardDebug() {
     try {
-      var res = await fetch(API_BASE + '/api/debug/dashboards');
+      var res = await fetch('/api/debug/dashboards');
       var data = await res.json();
 
-      var msg = '🔍 Dashboard Debug Info\\n\\n';
-      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\\n';
-      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\\n';
-      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\\n\\n';
+      var msg = '🔍 Dashboard Debug Info\n\n';
+      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\n';
+      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\n';
+      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\n\n';
 
       if (data.lovelace_config) {
-        msg += '⚙️ Lovelace config:\\n';
-        msg += JSON.stringify(data.lovelace_config, null, 2) + '\\n\\n';
+        msg += '⚙️ Lovelace config:\n';
+        msg += JSON.stringify(data.lovelace_config, null, 2) + '\n\n';
       }
 
       if (data.dashboard_files && data.dashboard_files.length > 0) {
-        msg += '📋 Found dashboards:\\n';
-        data.dashboard_files.forEach(function(f) { msg += '  - ' + f + '\\n'; });
+        msg += '📋 Found dashboards:\n';
+        data.dashboard_files.forEach(function(f){ msg += '  - ' + f + '\n'; });
       }
 
       alert(msg);
@@ -1645,6 +1752,101 @@ def api_debug_ha():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "info": info}), 200
 
+@app.route("/api/debug/tokens", methods=["GET"])
+def api_debug_tokens():
+    return jsonify({
+        "options_json_path": ADDON_OPTIONS_PATH,
+        "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
+        "options_json_content": _read_options_json(),
+        "env_vars": {
+            "HOMEASSISTANT_TOKEN": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
+            "SUPERVISOR_TOKEN": bool(os.environ.get("SUPERVISOR_TOKEN")),
+            "HA_CONFIG_PATH": HA_CONFIG_PATH,
+        },
+        "discovered_tokens": TOKEN_DEBUG,
+        "active_connection": {
+            "url": conn.active_base_url,
+            "mode": conn.active_mode,
+            "has_token": bool(conn.active_token),
+        }
+    })
+
+@app.route("/api/debug/config_yaml", methods=["GET"])
+def api_debug_config_yaml():
+    valid, msg, details = validate_configuration_yaml()
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    preview = None
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                preview = "".join(lines[:50])
+                if len(lines) > 50:
+                    preview += f"\n... ({len(lines) - 50} more lines)"
+        except Exception as e:
+            preview = f"Error reading: {e}"
+
+    return jsonify({
+        "valid": valid,
+        "message": msg,
+        "details": details,
+        "path": config_yaml_path,
+        "preview": preview
+    }), 200
+
+@app.route("/api/debug/dashboards", methods=["GET"])
+def api_debug_dashboards():
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    debug_info: Dict[str, Any] = {
+        "config_yaml_exists": os.path.exists(config_yaml_path),
+        "config_yaml_path": config_yaml_path,
+        "dashboards_path": DASHBOARDS_PATH,
+        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
+    }
+
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            debug_info["config_yaml_content"] = config
+            debug_info["lovelace_config"] = config.get("lovelace", {})
+        except Exception as e:
+            debug_info["config_yaml_error"] = str(e)
+
+    try:
+        files = list_yaml_files(DASHBOARDS_PATH)
+        debug_info["dashboard_files"] = files
+        debug_info["dashboard_files_count"] = len(files)
+    except Exception as e:
+        debug_info["dashboard_files_error"] = str(e)
+
+    try:
+        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
+        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
+    except Exception as e:
+        debug_info["permissions_error"] = str(e)
+
+    return jsonify(debug_info), 200
+
+@app.route("/api/init_lovelace", methods=["POST"])
+def api_init_lovelace():
+    """Initialiseer lovelace config in configuration.yaml"""
+    try:
+        ok, msg = ensure_lovelace_config()
+        if ok:
+            ha_call_service("homeassistant", "reload_core_config", {})
+            return jsonify({
+                "success": True,
+                "message": msg,
+                "config_path": os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+            }), 200
+        else:
+            return jsonify({"success": False, "error": msg}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/api/setup", methods=["POST"])
 def api_setup():
     ok, msg = conn.probe(force=True)
@@ -1652,26 +1854,34 @@ def api_setup():
         return jsonify({"ok": False, "error": msg}), 400
 
     data = request.json or {}
-    preset = (data.get("preset") or "indigo_luxe").strip()
+    preset = (data.get("preset") or "midnight_pro").strip()
     density = (data.get("density") or "comfy").strip()
 
     steps: List[str] = []
     try:
+        ok_lovelace, msg_lovelace = ensure_lovelace_config()
+        if ok_lovelace:
+            steps.append(f"✅ {msg_lovelace}")
+        else:
+            steps.append(f"⚠️ {msg_lovelace}")
+
         steps.append(install_mushroom())
         steps.append(ensure_mushroom_resource())
         steps.append(install_dashboard_theme(preset, density))
         steps.append(try_set_theme_auto())
 
+        ha_call_service("homeassistant", "reload_core_config", {})
+        steps.append("✅ Core config herladen")
+
+        time.sleep(1)
+
         ha_call_service("lovelace", "reload", {})
-        steps.append("Lovelace reload (best effort)")
+        steps.append("✅ Lovelace herladen")
 
         return jsonify({"ok": True, "steps": steps}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
 
-# -------------------------
-# Fix 2: Forceer Core Config Reload na registratie (create_demo)
-# -------------------------
 @app.route("/api/create_demo", methods=["POST"])
 def api_create_demo():
     ok, msg = conn.probe(force=True)
@@ -1686,7 +1896,6 @@ def api_create_demo():
 
     reg_msg = register_dashboard_in_lovelace(fn, title)
 
-    # ✅ CRITICAL: Forceer reload in de juiste volgorde
     try:
         ha_call_service("homeassistant", "reload_core_config", {})
         print("✅ Core config reloaded")
@@ -1703,9 +1912,6 @@ def api_create_demo():
         "message": "Dashboard aangemaakt. Herlaad je browser als het niet meteen verschijnt."
     }), 200
 
-# -------------------------
-# Fix 2: Forceer Core Config Reload na registratie (create_dashboards)
-# -------------------------
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     ok, msg = conn.probe(force=True)
@@ -1717,6 +1923,7 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
+    # Simple dashboard
     simple_title = f"{base_title} - Basis"
     states = safe_get_states()
     simple_entities = [
@@ -1765,6 +1972,7 @@ def api_create_dashboards():
         }]
     }
 
+    # Advanced dashboard
     adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
@@ -1780,7 +1988,6 @@ def api_create_dashboards():
     reg1 = register_dashboard_in_lovelace(simple_fn, simple_title)
     reg2 = register_dashboard_in_lovelace(adv_fn, adv_title)
 
-    # ✅ CRITICAL: Forceer reload
     try:
         ha_call_service("homeassistant", "reload_core_config", {})
         print("✅ Core config reloaded")
@@ -1848,77 +2055,16 @@ def api_reload_lovelace():
 
     return jsonify({"ok": False, "error": "Vernieuwen lukt niet.", "details": last}), 400
 
-@app.route("/api/debug/tokens", methods=["GET"])
-def api_debug_tokens():
-    return jsonify({
-        "options_json_path": ADDON_OPTIONS_PATH,
-        "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
-        "options_json_content": _read_options_json(),
-        "env_vars": {
-            "HOMEASSISTANT_TOKEN": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
-            "SUPERVISOR_TOKEN": bool(os.environ.get("SUPERVISOR_TOKEN")),
-            "HA_CONFIG_PATH": HA_CONFIG_PATH,
-        },
-        "discovered_tokens": TOKEN_DEBUG,
-        "active_connection": {
-            "url": conn.active_base_url,
-            "mode": conn.active_mode,
-            "has_token": bool(conn.active_token),
-        }
-    })
-
-# -------------------------
-# Fix 3: Debug endpoint dashboards
-# -------------------------
-@app.route("/api/debug/dashboards", methods=["GET"])
-def api_debug_dashboards():
-    """Debug endpoint om te zien waarom dashboards niet verschijnen"""
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    debug_info: Dict[str, Any] = {
-        "config_yaml_exists": os.path.exists(config_yaml_path),
-        "config_yaml_path": config_yaml_path,
-        "dashboards_path": DASHBOARDS_PATH,
-        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
-    }
-
-    if os.path.exists(config_yaml_path):
-        try:
-            with open(config_yaml_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
-            debug_info["config_yaml_content"] = config
-            debug_info["lovelace_config"] = config.get("lovelace", {})
-        except Exception as e:
-            debug_info["config_yaml_error"] = str(e)
-
-    try:
-        files = list_yaml_files(DASHBOARDS_PATH)
-        debug_info["dashboard_files"] = files
-        debug_info["dashboard_files_count"] = len(files)
-    except Exception as e:
-        debug_info["dashboard_files_error"] = str(e)
-
-    try:
-        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
-        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
-    except Exception as e:
-        debug_info["permissions_error"] = str(e)
-
-    return jsonify(debug_info), 200
-
 if __name__ == "__main__":
-    port = int(os.environ.get("INGRESS_PORT") or os.environ.get("PORT") or "5001")
-
     print("\n" + "=" * 60)
     print(f"{APP_NAME} starting... ({APP_VERSION})")
     print("=" * 60)
     print("🌐 Starting Flask with ingress support...")
-    print(f"🌐 Listening on 0.0.0.0:{port}")
     print("=" * 60 + "\n")
 
     app.run(
         host="0.0.0.0",
-        port=port,
+        port=5001,
         debug=False,
         threaded=True,
         use_reloader=False

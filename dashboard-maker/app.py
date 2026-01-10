@@ -13,50 +13,72 @@ import zipfile
 import io
 import json
 import time
-import warnings
+import urllib3
 
-warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
-# =========================
-# App meta
-# =========================
-APP_NAME = "Dashboard Maker"
-APP_VERSION = "2.6.0-yamlmode"
+# -----------------------------------------------------------------------------
+# App metadata
+# -----------------------------------------------------------------------------
+APP_NAME = os.environ.get("APP_NAME", "Dashboard Maker")
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 
 app = Flask(__name__)
 
-
-# =========================
-# Paths / Defaults
-# =========================
-ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
-CONFIGURED_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "").strip()  # optional override
-HA_CONFIG_PATH = CONFIGURED_CONFIG_PATH if CONFIGURED_CONFIG_PATH else "/config"
+# -----------------------------------------------------------------------------
+# Paths / constants
+# -----------------------------------------------------------------------------
+CONFIGURED_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
+HA_CONFIG_PATH = os.path.abspath(CONFIGURED_CONFIG_PATH)
 
 DASHBOARDS_PATH = os.path.join(HA_CONFIG_PATH, "dashboards")
 WWW_PATH = os.path.join(HA_CONFIG_PATH, "www")
 COMMUNITY_PATH = os.path.join(WWW_PATH, "community")
 MUSHROOM_PATH = os.path.join(COMMUNITY_PATH, "lovelace-mushroom")
 
-DASHBOARD_THEME_DIR = os.path.join(HA_CONFIG_PATH, "themes", "dashboard_maker")
+THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
+DASHBOARD_THEME_DIR = os.path.join(THEMES_PATH, "dashboard_maker")
 DASHBOARD_THEME_FILE = os.path.join(DASHBOARD_THEME_DIR, "dashboard_maker.yaml")
 
-# Candidate base urls (direct + supervisor)
+ADDON_OPTIONS_PATH = "/data/options.json"
+
+SUPERVISOR_TOKEN_ENV = "SUPERVISOR_TOKEN"
+HOMEASSISTANT_TOKEN_ENV = "HOMEASSISTANT_TOKEN"
+
 HA_URLS = [
-    os.environ.get("HA_URL", "").strip(),
     "http://supervisor/core",
     "http://homeassistant:8123",
-    "http://localhost:8123",
+    "http://127.0.0.1:8123",
 ]
-HA_URLS = [u for u in HA_URLS if u]
+
+DEFAULT_MUSHROOM_ZIP = "https://github.com/piitaya/lovelace-mushroom/releases/latest/download/lovelace-mushroom.zip"
 
 
-# =========================
-# Helpers: FS / YAML
-# =========================
-def ensure_dir(p: str) -> None:
-    os.makedirs(p, exist_ok=True)
+# -----------------------------------------------------------------------------
+# Utils
+# -----------------------------------------------------------------------------
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def sanitize_filename(name: str) -> str:
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s, flags=re.UNICODE)
+    s = re.sub(r"[\s_-]+", "_", s)
+    s = re.sub(r"^_+|_+$", "", s)
+    return s or "dashboard"
+
+
+def next_available_filename(folder: str, filename: str) -> str:
+    ensure_dir(folder)
+    base = Path(filename).stem
+    ext = Path(filename).suffix or ".yaml"
+    candidate = f"{base}{ext}"
+    i = 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{base}_{i}{ext}"
+        i += 1
+    return candidate
 
 
 def write_text_file(path: str, content: str) -> None:
@@ -65,78 +87,42 @@ def write_text_file(path: str, content: str) -> None:
         f.write(content)
 
 
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
 def list_yaml_files(folder: str) -> List[str]:
     if not os.path.exists(folder):
         return []
-    out: List[str] = []
+    files: List[str] = []
     for fn in os.listdir(folder):
         if fn.lower().endswith((".yaml", ".yml")):
-            out.append(fn)
-    return sorted(out)
+            files.append(fn)
+    return sorted(files)
 
 
-def sanitize_filename(name: str) -> str:
-    s = (name or "").strip().lower()
-    s = re.sub(r"[^\w\s-]", "", s)
-    s = re.sub(r"[\s_]+", "_", s)
-    s = re.sub(r"_+", "_", s)
-    return s.strip("_") or "dashboard"
+def safe_yaml_dump(data: Any) -> str:
+    return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
-def next_available_filename(folder: str, preferred: str) -> str:
-    ensure_dir(folder)
-    base = preferred
-    if not base.lower().endswith(".yaml"):
-        base += ".yaml"
-    cand = base
-    i = 1
-    while os.path.exists(os.path.join(folder, cand)):
-        stem = base[:-5]
-        cand = f"{stem}_{i}.yaml"
-        i += 1
-    return cand
-
-
-def safe_yaml_dump(obj: Any) -> str:
-    return yaml.safe_dump(
-        obj,
-        default_flow_style=False,
-        allow_unicode=True,
-        sort_keys=False,
-        width=1000,
-        indent=2,
-    )
-
-
-# =========================
-# Add-on options reader
-# =========================
 def _read_options_json() -> Dict[str, Any]:
+    if not os.path.exists(ADDON_OPTIONS_PATH):
+        return {}
     try:
-        if os.path.exists(ADDON_OPTIONS_PATH):
-            with open(ADDON_OPTIONS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        pass
-    return {}
+        with open(ADDON_OPTIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as e:
+        print(f"options.json read error: {e}")
+        return {}
 
 
-# =========================
-# Connection to Home Assistant
-# =========================
+# -----------------------------------------------------------------------------
+# Home Assistant Connection
+# -----------------------------------------------------------------------------
 class HAConnection:
     def __init__(self) -> None:
+        self.user_token: Optional[str] = None
+        self.supervisor_token: Optional[str] = None
+
         self.active_base_url: Optional[str] = None
         self.active_token: Optional[str] = None
         self.active_mode: str = "unknown"
-
-        self.user_token: Optional[str] = None
-        self.supervisor_token: Optional[str] = None
 
         self.last_probe: str = ""
         self.probe_attempts: List[Dict[str, Any]] = []
@@ -146,32 +132,29 @@ class HAConnection:
 
     def refresh_tokens(self) -> None:
         opts = _read_options_json()
-        access_token = (opts.get("access_token") or opts.get("token") or "").strip()
-
-        env_user = (os.environ.get("HOMEASSISTANT_TOKEN") or "").strip()
-        env_sup = (os.environ.get("SUPERVISOR_TOKEN") or "").strip()
-
-        self.user_token = access_token or env_user or None
-        self.supervisor_token = env_sup or None
+        access_token = (opts.get("access_token") or "").strip()
+        self.user_token = access_token or os.environ.get(HOMEASSISTANT_TOKEN_ENV)
+        self.supervisor_token = os.environ.get(SUPERVISOR_TOKEN_ENV)
 
         self.token_debug = {
             "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
             "options_json_path": ADDON_OPTIONS_PATH,
             "access_token_in_options": bool(access_token),
-            "HOMEASSISTANT_TOKEN_env": bool(env_user),
-            "SUPERVISOR_TOKEN_env": bool(env_sup),
+            "HOMEASSISTANT_TOKEN_env": bool(os.environ.get(HOMEASSISTANT_TOKEN_ENV)),
+            "SUPERVISOR_TOKEN_env": bool(os.environ.get(SUPERVISOR_TOKEN_ENV)),
+            "user_token_length": len(self.user_token) if self.user_token else 0,
+            "supervisor_token_length": len(self.supervisor_token) if self.supervisor_token else 0,
             "ha_urls": HA_URLS,
         }
 
-    def _headers(self, token: str) -> Dict[str, str]:
+    def _headers(self, token: Optional[str]) -> Dict[str, str]:
         return {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {token}" if token else "",
             "Content-Type": "application/json",
         }
 
-    # ✅ Fix: improved JSON validation & HTML detection
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
-        debug: Dict[str, Any] = {
+        debug = {
             "url": url,
             "mode": mode,
             "token_provided": bool(token),
@@ -184,7 +167,12 @@ class HAConnection:
             test_url = f"{url}/api/"
             debug["test_url"] = test_url
 
-            r = requests.get(test_url, headers=self._headers(token), timeout=10, verify=False)
+            r = requests.get(
+                test_url,
+                headers=self._headers(token),
+                timeout=10,
+                verify=False
+            )
 
             debug["status_code"] = r.status_code
             debug["response_length"] = len(r.text)
@@ -199,7 +187,7 @@ class HAConnection:
                         return False, "Geen JSON response", debug
 
                     data = r.json()
-                    debug["response_message"] = data.get("message", "")
+                    debug["response_message"] = (data or {}).get("message", "")
                     debug["response_data"] = str(data)[:200]
                     return True, "OK", debug
 
@@ -207,16 +195,10 @@ class HAConnection:
                     debug["json_error"] = str(e)
                     debug["response_text"] = r.text[:500]
                     debug["error"] = f"JSON parse error: {str(e)}"
-
                     if r.text.strip().startswith("<"):
                         debug["error"] = "Response is HTML (mogelijk login page)"
                         return False, "HTML response (login page?)", debug
-
                     return False, f"Ongeldige JSON: {str(e)[:50]}", debug
-                except Exception as e:
-                    debug["parse_error"] = str(e)
-                    debug["response_text"] = r.text[:500]
-                    return False, f"Parse error: {str(e)[:50]}", debug
 
             if r.status_code == 401:
                 debug["error"] = "Unauthorized - token werkt niet"
@@ -242,7 +224,6 @@ class HAConnection:
             debug["error"] = f"Exception: {str(e)[:200]}"
             return False, str(e)[:100], debug
 
-    # ✅ Fix: improved probe reporting
     def probe(self, force: bool = False) -> Tuple[bool, str]:
         if self.active_base_url and self.active_token and not force:
             return True, f"cached:{self.active_mode}"
@@ -305,6 +286,7 @@ class HAConnection:
         error_msg += "2. Home Assistant geeft HTML ipv JSON (login page?)\n"
         error_msg += "3. Verkeerde URL/endpoint\n"
         error_msg += "4. Firewall/netwerk blokkade\n\n"
+
         error_msg += "🔧 Oplossing:\n"
         error_msg += "1. Maak NIEUWE Long-Lived Access Token in HA\n"
         error_msg += "2. Zet token in add-on config: access_token\n"
@@ -315,7 +297,6 @@ class HAConnection:
         print(error_msg)
         return False, error_msg
 
-    # ✅ Fix: improved request with HTML warning
     def request(self, method: str, path: str, json_body: dict | None = None, timeout: int = 15) -> requests.Response:
         ok, _ = self.probe(force=False)
         if not ok or not self.active_base_url:
@@ -332,10 +313,10 @@ class HAConnection:
             r = requests.request(
                 method,
                 url,
-                headers=self._headers(self.active_token or ""),
+                headers=self._headers(self.active_token),
                 json=json_body,
                 timeout=timeout,
-                verify=False,
+                verify=False
             )
 
             content_type = r.headers.get("Content-Type", "unknown")
@@ -356,11 +337,12 @@ class HAConnection:
                     r = requests.request(
                         method,
                         url,
-                        headers=self._headers(self.active_token or ""),
+                        headers=self._headers(self.active_token),
                         json=json_body,
                         timeout=timeout,
-                        verify=False,
+                        verify=False
                     )
+
             return r
 
         except requests.exceptions.RequestException as e:
@@ -370,79 +352,72 @@ class HAConnection:
 
 conn = HAConnection()
 
-
-# =========================
-# HA API helpers
-# =========================
-def ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> Tuple[bool, str]:
-    try:
-        r = conn.request("POST", f"/api/services/{domain}/{service}", json_body=data, timeout=15)
-        if r.status_code in (200, 201):
-            return True, "OK"
-        return False, f"HTTP {r.status_code}: {r.text[:200]}"
-    except Exception as e:
-        return False, str(e)
-
-
+# -----------------------------------------------------------------------------
+# HA helpers
+# -----------------------------------------------------------------------------
 def safe_get_states() -> List[Dict[str, Any]]:
     try:
-        r = conn.request("GET", "/api/states", timeout=20)
+        r = conn.request("GET", "/api/states", timeout=25)
         if r.status_code == 200:
-            ct = r.headers.get("Content-Type", "")
-            if "application/json" in ct:
-                return r.json() or []
-    except Exception:
-        pass
+            return r.json()
+    except Exception as e:
+        print(f"safe_get_states error: {e}")
     return []
 
 
 def get_area_registry() -> List[Dict[str, Any]]:
     try:
-        r = conn.request("GET", "/api/config/area_registry/list", timeout=20)
-        if r.status_code == 200 and "application/json" in r.headers.get("Content-Type", ""):
-            return r.json() or []
-    except Exception:
-        pass
+        r = conn.request("GET", "/api/config/area_registry", timeout=20)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"get_area_registry error: {e}")
     return []
 
 
 def get_entity_registry() -> List[Dict[str, Any]]:
     try:
-        r = conn.request("GET", "/api/config/entity_registry/list", timeout=20)
-        if r.status_code == 200 and "application/json" in r.headers.get("Content-Type", ""):
-            return r.json() or []
-    except Exception:
-        pass
+        r = conn.request("GET", "/api/config/entity_registry", timeout=20)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"get_entity_registry error: {e}")
     return []
 
 
-# =========================
-# Mushroom install / checks
-# =========================
+def ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    payload = data or {}
+    r = conn.request("POST", f"/api/services/{domain}/{service}", json_body=payload, timeout=20)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Service call failed: {domain}.{service} HTTP {r.status_code} - {r.text[:200]}")
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# Mushroom install / resource
+# -----------------------------------------------------------------------------
 def mushroom_installed() -> bool:
     possible_paths = [
         os.path.join(MUSHROOM_PATH, "dist"),
         os.path.join(MUSHROOM_PATH, "build"),
-        MUSHROOM_PATH,
+        MUSHROOM_PATH
     ]
-
     for check_path in possible_paths:
         if os.path.exists(check_path):
             try:
-                all_files: List[str] = []
                 for root, _dirs, files in os.walk(check_path):
-                    all_files.extend([f for f in files if f.endswith(".js")])
-                if all_files:
-                    print(f"✓ Mushroom JS gevonden: {len(all_files)} files in {check_path}")
-                    return True
+                    for f in files:
+                        if f.endswith(".js"):
+                            return True
             except Exception as e:
                 print(f"Check error in {check_path}: {e}")
-
     return False
 
 
-# ✅ Fix: safer zip extraction move
-def download_and_extract_zip(url: str, target_dir: str):
+def download_and_extract_zip(url: str, target_dir: str) -> None:
     print(f"Downloading Mushroom from: {url}")
     r = requests.get(url, timeout=45, verify=False)
     r.raise_for_status()
@@ -472,20 +447,15 @@ def download_and_extract_zip(url: str, target_dir: str):
 def install_mushroom() -> str:
     ensure_dir(COMMUNITY_PATH)
     if mushroom_installed():
-        return "✅ Mushroom is al geïnstalleerd"
+        return "✅ Mushroom al geïnstalleerd"
 
-    # GitHub release zip (stable). If this changes, user can still use HACS.
-    url = "https://github.com/piitaya/lovelace-mushroom/releases/latest/download/lovelace-mushroom.zip"
-    try:
-        download_and_extract_zip(url, COMMUNITY_PATH)
-        if mushroom_installed():
-            return "✅ Mushroom geïnstalleerd"
-        return "⚠️ Mushroom install gedaan, maar JS niet gevonden (check map /config/www/community/lovelace-mushroom)"
-    except Exception as e:
-        return f"❌ Mushroom install gefaald: {e}"
+    opts = _read_options_json()
+    zip_url = (opts.get("mushroom_zip_url") or DEFAULT_MUSHROOM_ZIP).strip()
+
+    download_and_extract_zip(zip_url, COMMUNITY_PATH)
+    return "✅ Mushroom geïnstalleerd"
 
 
-# ✅ Fix: skip resources endpoint if not available (YAML mode)
 def ensure_mushroom_resource() -> str:
     """Probeer Mushroom resource te registreren (werkt niet altijd in YAML mode)"""
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
@@ -498,8 +468,8 @@ def ensure_mushroom_resource() -> str:
             print("⚠️ Lovelace resources API niet beschikbaar (YAML mode)")
             return "⚠️ Mushroom resource registratie overgeslagen (YAML mode - voeg handmatig toe)"
 
-        if r.status_code == 200 and "application/json" in r.headers.get("Content-Type", ""):
-            resources = r.json() or []
+        if r.status_code == 200:
+            resources = r.json()
             for res in resources:
                 url = res.get("url", "")
                 if local_url in url or "mushroom" in url:
@@ -522,64 +492,10 @@ def ensure_mushroom_resource() -> str:
     return "⚠️ Mushroom resource moet handmatig toegevoegd worden in configuration.yaml onder lovelace → resources"
 
 
-# =========================
-# Theme install
-# =========================
-def install_dashboard_theme(preset: str, density: str) -> str:
-    ensure_dir(DASHBOARD_THEME_DIR)
-
-    theme_content = f"""# Dashboard Maker Theme
-dashboard_maker:
-  preset: "{preset}"
-  dashboard_density: "{density}"
-"""
-    write_text_file(DASHBOARD_THEME_FILE, theme_content)
-
-    resources_example = """# Kopieer deze sectie naar je configuration.yaml
-
-lovelace:
-  mode: yaml
-  resources:
-    - url: /local/community/lovelace-mushroom/dist/mushroom.js
-      type: module
-  dashboards: {}
-"""
-    resources_file = os.path.join(DASHBOARD_THEME_DIR, "RESOURCES_EXAMPLE.yaml")
-    write_text_file(resources_file, resources_example)
-
-    return f"✅ Theme geïnstalleerd (check {resources_file} voor resources voorbeeld)"
-
-
-# ✅ Fix: better theme activation handling
-def try_set_theme_auto() -> str:
-    """Probeer theme te activeren (werkt niet altijd)"""
-    try:
-        r = conn.request(
-            "POST",
-            "/api/services/frontend/set_theme",
-            json_body={"name": "dashboard_maker", "mode": "auto"},
-            timeout=12,
-        )
-
-        if r.status_code in (200, 201):
-            return "✅ Theme geactiveerd (auto)"
-        elif r.status_code == 400:
-            print(f"⚠️ Theme service niet beschikbaar: {r.text[:200]}")
-            return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel)"
-        else:
-            print(f"⚠️ Theme activeren gefaald: HTTP {r.status_code}")
-            return "⚠️ Theme activeren overgeslagen (activeer handmatig)"
-
-    except Exception as e:
-        print(f"try_set_theme_auto warning: {e}")
-        return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel → Themes)"
-
-
-# =========================
-# configuration.yaml safety + lovelace setup
-# =========================
+# -----------------------------------------------------------------------------
+# configuration.yaml lovelace helpers
+# -----------------------------------------------------------------------------
 def backup_configuration_yaml() -> Optional[str]:
-    """Maak backup van configuration.yaml met timestamp"""
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
     if not os.path.exists(config_yaml_path):
         return None
@@ -594,7 +510,6 @@ def backup_configuration_yaml() -> Optional[str]:
         return None
 
 
-# ✅ Fix: preserve existing config, safe_dump with sort_keys False, width to avoid wrapping
 def ensure_lovelace_config() -> Tuple[bool, str]:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
     backup_path = None
@@ -602,12 +517,11 @@ def ensure_lovelace_config() -> Tuple[bool, str]:
     if os.path.exists(config_yaml_path):
         try:
             with open(config_yaml_path, "r", encoding="utf-8") as f:
-                original_content = f.read()
-                config = yaml.safe_load(original_content) or {}
+                content = f.read()
+                config = yaml.safe_load(content) or {}
         except Exception as e:
             return False, f"Kan configuration.yaml niet lezen: {e}"
     else:
-        original_content = ""
         config = {}
 
     if not isinstance(config, dict):
@@ -635,20 +549,10 @@ def ensure_lovelace_config() -> Tuple[bool, str]:
     if needs_update:
         try:
             with open(config_yaml_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(
-                    config,
-                    f,
-                    default_flow_style=False,
-                    allow_unicode=True,
-                    sort_keys=False,
-                    width=1000,
-                    indent=2,
-                )
-
+                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
             msg = "✅ configuration.yaml bijgewerkt"
             if backup_path:
                 msg += f" (backup: {os.path.basename(backup_path)})"
-            print(msg)
             return True, msg
         except Exception as e:
             return False, f"Kan configuration.yaml niet schrijven: {e}"
@@ -656,7 +560,6 @@ def ensure_lovelace_config() -> Tuple[bool, str]:
     return True, "Lovelace config al correct"
 
 
-# ✅ Fix: merge dashboards; dashboard key ALWAYS contains hyphen (-)
 def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
@@ -677,14 +580,9 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     dashboards = lovelace.get("dashboards", {}) if isinstance(lovelace.get("dashboards"), dict) else {}
 
     base_key = filename.replace(".yaml", "").replace("_", "-").replace(" ", "-").lower()
-    base_key = re.sub(r"-+", "-", base_key)
-    base_key = re.sub(r"^-+|-+$", "", base_key)
-
-    if "-" not in base_key:
-        base_key = f"dash-{base_key}"
-
-    if not base_key or base_key in ["dashboard", "dashboards", "-"]:
-        base_key = "dash-board"
+    base_key = re.sub(r"-?\d+$", "", base_key)
+    if not base_key or base_key in ["dashboard", "dashboards"]:
+        base_key = "dash"
 
     dashboard_key = base_key
     counter = 1
@@ -704,38 +602,80 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config["lovelace"] = lovelace
 
     try:
-        backup_configuration_yaml()
         with open(config_yaml_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(
-                config,
-                f,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                width=1000,
-                indent=2,
-            )
-
-        print(f"✅ Dashboard geregistreerd: {dashboard_key} -> {title}")
-        print(f"   📁 Bestand: dashboards/{filename}")
+            yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         return f"Dashboard '{title}' geregistreerd als '{dashboard_key}'"
     except Exception as e:
         return f"Schrijven gefaald: {e}"
 
 
-# =========================
+# -----------------------------------------------------------------------------
+# Theme
+# -----------------------------------------------------------------------------
+def try_set_theme_auto() -> str:
+    """Probeer theme te activeren (werkt niet altijd)"""
+    try:
+        r = conn.request(
+            "POST",
+            "/api/services/frontend/set_theme",
+            json_body={"name": "dashboard_maker", "mode": "auto"},
+            timeout=12
+        )
+
+        if r.status_code in (200, 201):
+            return "✅ Theme geactiveerd (auto)"
+        elif r.status_code == 400:
+            print(f"⚠️ Theme service niet beschikbaar: {r.text[:200]}")
+            return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel)"
+        else:
+            print(f"⚠️ Theme activeren gefaald: HTTP {r.status_code}")
+            return "⚠️ Theme activeren overgeslagen (activeer handmatig)"
+
+    except Exception as e:
+        print(f"try_set_theme_auto warning: {e}")
+        return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel → Themes)"
+
+
+# ✅ Fix 1: Update install_dashboard_theme - voeg resources sectie toe aan output
+def install_dashboard_theme(preset: str, density: str) -> str:
+    ensure_dir(DASHBOARD_THEME_DIR)
+
+    # Theme content
+    theme_content = f"""# Dashboard Maker Theme
+dashboard_maker:
+  preset: "{preset}"
+  dashboard_density: "{density}"
+"""
+    write_text_file(DASHBOARD_THEME_FILE, theme_content)
+
+    # ✅ Maak apart resources file dat gebruiker kan kopieren
+    resources_example = """# Kopieer deze sectie naar je configuration.yaml
+
+lovelace:
+  mode: yaml
+  resources:
+    - url: /local/community/lovelace-mushroom/dist/mushroom.js
+      type: module
+  dashboards: {}
+"""
+
+    resources_file = os.path.join(DASHBOARD_THEME_DIR, "RESOURCES_EXAMPLE.yaml")
+    write_text_file(resources_file, resources_example)
+
+    return f"✅ Theme geïnstalleerd (check {resources_file} voor resources voorbeeld)"
+
+
+# -----------------------------------------------------------------------------
 # Dashboard builders
-# =========================
+# -----------------------------------------------------------------------------
 def build_simple_single_page_dashboard(title: str) -> Dict[str, Any]:
     states = safe_get_states()
 
-    cards: List[Dict[str, Any]] = [
-        {
-            "type": "custom:mushroom-title-card",
-            "title": title,
-            "subtitle": "{{ now().strftime('%d %B %Y') }}",
-        }
-    ]
+    cards: List[Dict[str, Any]] = [{
+        "type": "custom:mushroom-title-card",
+        "title": title,
+        "subtitle": "{{ now().strftime('%d %B %Y') }}"
+    }]
 
     lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")][:8]
     switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")][:6]
@@ -758,21 +698,17 @@ def build_simple_single_page_dashboard(title: str) -> Dict[str, Any]:
 
     return {
         "title": title,
-        "views": [
-            {
-                "title": "Overzicht",
-                "path": "home",
-                "icon": "mdi:view-dashboard",
-                "type": "sections",
-                "sections": [{"type": "grid", "cards": cards}],
-            }
-        ],
+        "views": [{
+            "title": "Overzicht",
+            "path": "home",
+            "icon": "mdi:view-dashboard",
+            "type": "sections",
+            "sections": [{"type": "grid", "cards": cards}]
+        }]
     }
 
 
-# ✅ Fix: Area-Based Multi-Page Dashboard
 def build_area_based_dashboard(title: str) -> Dict[str, Any]:
-    """Bouwt een multi-page dashboard gebaseerd op areas/kamers"""
     states = safe_get_states()
     areas = get_area_registry()
     entity_registry = get_entity_registry()
@@ -799,7 +735,6 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
         entity_id = state.get("entity_id", "")
         if not entity_id:
             continue
-
         area_id = entity_to_area.get(entity_id)
         if area_id:
             entities_by_area.setdefault(area_id, []).append(state)
@@ -808,25 +743,22 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
 
     views: List[Dict[str, Any]] = []
 
-    # VIEW 1: HOME/OVERVIEW
-    home_cards: List[Dict[str, Any]] = []
-    home_cards.append(
-        {"type": "custom:mushroom-title-card", "title": "Hallo! 👋", "subtitle": "{{ now().strftime('%-d %B %Y') }}"}
-    )
+    home_cards: List[Dict[str, Any]] = [{
+        "type": "custom:mushroom-title-card",
+        "title": "Hallo! 👋",
+        "subtitle": "{{ now().strftime('%-d %B %Y') }}"
+    }]
 
     chips: List[Dict[str, Any]] = []
     persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
     lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
-
     if persons:
         chips.append({"type": "entity", "entity": persons[0]["entity_id"], "use_entity_picture": True})
     if lights:
-        light_count = len([l for l in lights if l.get("state") == "on"])
+        light_count = len([l for l in lights if (l.get("state") or "") == "on"])
         chips.append({"type": "template", "icon": "mdi:lightbulb-group", "content": f"{light_count} aan", "tap_action": {"action": "none"}})
 
-    power_sensors = [
-        e for e in states if "power" in (e.get("entity_id", "") or "").lower() and (e.get("entity_id", "") or "").startswith("sensor.")
-    ]
+    power_sensors = [e for e in states if "power" in (e.get("entity_id", "") or "").lower() and "sensor." in (e.get("entity_id", "") or "")]
     if power_sensors:
         chips.append({"type": "entity", "entity": power_sensors[0]["entity_id"]})
 
@@ -841,20 +773,20 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
         area_temp = [e for e in area_entities if "temperature" in (e.get("entity_id", "") or "").lower()]
 
         icon = "mdi:home"
-        lname = area_name.lower()
-        if "woonkamer" in lname or "living" in lname:
+        low = area_name.lower()
+        if "woonkamer" in low or "living" in low:
             icon = "mdi:sofa"
-        elif "slaapkamer" in lname or "bedroom" in lname:
+        elif "slaapkamer" in low or "bedroom" in low:
             icon = "mdi:bed"
-        elif "keuken" in lname or "kitchen" in lname:
+        elif "keuken" in low or "kitchen" in low:
             icon = "mdi:chef-hat"
-        elif "badkamer" in lname or "bathroom" in lname:
+        elif "badkamer" in low or "bathroom" in low:
             icon = "mdi:shower"
-        elif "zolder" in lname or "attic" in lname:
+        elif "zolder" in low or "attic" in low:
             icon = "mdi:home-roof"
-        elif "kantoor" in lname or "office" in lname:
+        elif "kantoor" in low or "office" in low:
             icon = "mdi:desk"
-        elif "tuin" in lname or "garden" in lname:
+        elif "tuin" in low or "garden" in low:
             icon = "mdi:flower"
 
         temp_info = ""
@@ -865,22 +797,20 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
 
         light_info = ""
         if area_lights:
-            on_count = len([l for l in area_lights if l.get("state") == "on"])
+            on_count = len([l for l in area_lights if (l.get("state") or "") == "on"])
             light_info = f"{on_count}/{len(area_lights)} lampen"
 
         secondary_text = " | ".join(filter(None, [temp_info, light_info]))
 
-        home_cards.append(
-            {
-                "type": "custom:mushroom-template-card",
-                "primary": area_name,
-                "secondary": secondary_text or "Klik voor details",
-                "icon": icon,
-                "icon_color": "blue",
-                "tap_action": {"action": "navigate", "navigation_path": f"#{sanitize_filename(area_name).replace('_','-')}"},
-                "card_mod": {"style": "ha-card { background: rgba(var(--rgb-primary-color), 0.05); }"},
-            }
-        )
+        home_cards.append({
+            "type": "custom:mushroom-template-card",
+            "primary": area_name,
+            "secondary": secondary_text or "Klik voor details",
+            "icon": icon,
+            "icon_color": "blue",
+            "tap_action": {"action": "navigate", "navigation_path": f"#{sanitize_filename(area_name).replace('_', '-')}"},
+            "card_mod": {"style": "ha-card { background: rgba(var(--rgb-primary-color), 0.05); }"}
+        })
 
     if entities_without_area:
         home_cards.append({"type": "custom:mushroom-title-card", "title": "Overig"})
@@ -891,24 +821,23 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
             elif entity_id.startswith("switch."):
                 home_cards.append({"type": "custom:mushroom-entity-card", "entity": entity_id, "tap_action": {"action": "toggle"}})
 
-    views.append(
-        {
-            "title": "Home",
-            "path": "home",
-            "icon": "mdi:home",
-            "type": "sections",
-            "sections": [{"type": "grid", "cards": home_cards, "column_span": 1}],
-        }
-    )
+    views.append({
+        "title": "Home",
+        "path": "home",
+        "icon": "mdi:home",
+        "type": "sections",
+        "sections": [{"type": "grid", "cards": home_cards, "column_span": 1}]
+    })
 
-    # VIEW 2+: AREA PAGES
     for area_id, area_entities in sorted(entities_by_area.items()):
         area_name = area_names.get(area_id, area_id)
         area_path = sanitize_filename(area_name).replace("_", "-")
 
-        area_cards: List[Dict[str, Any]] = [
-            {"type": "custom:mushroom-title-card", "title": area_name, "subtitle": "{{ now().strftime('%H:%M') }}"}
-        ]
+        area_cards: List[Dict[str, Any]] = [{
+            "type": "custom:mushroom-title-card",
+            "title": area_name,
+            "subtitle": "{{ now().strftime('%H:%M') }}"
+        }]
 
         area_lights = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("light.")]
         area_switches = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("switch.")]
@@ -920,54 +849,46 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
         if area_lights:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting"})
             for light in area_lights:
-                area_cards.append(
-                    {
-                        "type": "custom:mushroom-light-card",
-                        "entity": light["entity_id"],
-                        "use_light_color": True,
-                        "show_brightness_control": True,
-                        "show_color_control": True,
-                        "collapsible_controls": True,
-                    }
-                )
+                area_cards.append({
+                    "type": "custom:mushroom-light-card",
+                    "entity": light["entity_id"],
+                    "use_light_color": True,
+                    "show_brightness_control": True,
+                    "show_color_control": True,
+                    "collapsible_controls": True
+                })
 
         if area_climate:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat"})
-            for c in area_climate:
-                area_cards.append(
-                    {
-                        "type": "custom:mushroom-climate-card",
-                        "entity": c["entity_id"],
-                        "show_temperature_control": True,
-                        "collapsible_controls": True,
-                    }
-                )
+            for climate in area_climate:
+                area_cards.append({
+                    "type": "custom:mushroom-climate-card",
+                    "entity": climate["entity_id"],
+                    "show_temperature_control": True,
+                    "collapsible_controls": True
+                })
 
         if area_covers:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Raamdecoratie"})
             for cover in area_covers:
-                area_cards.append(
-                    {
-                        "type": "custom:mushroom-cover-card",
-                        "entity": cover["entity_id"],
-                        "show_buttons_control": True,
-                        "show_position_control": True,
-                        "collapsible_controls": True,
-                    }
-                )
+                area_cards.append({
+                    "type": "custom:mushroom-cover-card",
+                    "entity": cover["entity_id"],
+                    "show_buttons_control": True,
+                    "show_position_control": True,
+                    "collapsible_controls": True
+                })
 
         if area_media:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media"})
-            for m in area_media:
-                area_cards.append(
-                    {
-                        "type": "custom:mushroom-media-player-card",
-                        "entity": m["entity_id"],
-                        "use_media_info": True,
-                        "show_volume_level": True,
-                        "collapsible_controls": True,
-                    }
-                )
+            for media in area_media:
+                area_cards.append({
+                    "type": "custom:mushroom-media-player-card",
+                    "entity": media["entity_id"],
+                    "use_media_info": True,
+                    "show_volume_level": True,
+                    "collapsible_controls": True
+                })
 
         if area_switches:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Apparaten"})
@@ -978,296 +899,37 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
         humidity_sensors = [s for s in area_sensors if "humidity" in (s.get("entity_id", "") or "").lower()]
         if temp_sensors or humidity_sensors:
             area_cards.append({"type": "custom:mushroom-title-card", "title": "📊 Metingen"})
-            for t in temp_sensors[:3]:
-                area_cards.append({"type": "custom:mushroom-entity-card", "entity": t["entity_id"], "icon": "mdi:thermometer"})
-            for h in humidity_sensors[:3]:
-                area_cards.append({"type": "custom:mushroom-entity-card", "entity": h["entity_id"], "icon": "mdi:water-percent"})
+            for temp in temp_sensors[:3]:
+                area_cards.append({"type": "custom:mushroom-entity-card", "entity": temp["entity_id"], "icon": "mdi:thermometer"})
+            for hum in humidity_sensors[:3]:
+                area_cards.append({"type": "custom:mushroom-entity-card", "entity": hum["entity_id"], "icon": "mdi:water-percent"})
 
         if len(area_cards) == 1:
-            area_cards.append(
-                {
-                    "type": "markdown",
-                    "content": f"# {area_name}\n\n✅ Nog geen devices toegevoegd aan deze ruimte.\n\nVoeg devices toe via Instellingen → Apparaten & Diensten.",
-                }
-            )
+            area_cards.append({
+                "type": "markdown",
+                "content": f"# {area_name}\n\n✅ Nog geen devices toegevoegd aan deze ruimte.\n\nVoeg devices toe via Instellingen → Apparaten & Diensten."
+            })
 
-        views.append(
-            {
-                "title": area_name,
-                "path": area_path,
-                "icon": "mdi:door",
-                "type": "sections",
-                "sections": [{"type": "grid", "cards": area_cards, "column_span": 1}],
-            }
-        )
+        views.append({
+            "title": area_name,
+            "path": area_path,
+            "icon": "mdi:door",
+            "type": "sections",
+            "sections": [{"type": "grid", "cards": area_cards, "column_span": 1}]
+        })
 
     return {"title": title, "views": views}
 
 
-def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
-    dashboard = build_area_based_dashboard(dashboard_title)
-
-    if len(dashboard.get("views", [])) == 1:
-        demo_views = [
-            {
-                "title": "Woonkamer",
-                "path": "woonkamer",
-                "icon": "mdi:sofa",
-                "type": "sections",
-                "sections": [
-                    {
-                        "type": "grid",
-                        "cards": [
-                            {"type": "custom:mushroom-title-card", "title": "🛋️ Woonkamer", "subtitle": "Demo ruimte"},
-                            {"type": "markdown", "content": "# Woonkamer\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"},
-                        ],
-                    }
-                ],
-            },
-            {
-                "title": "Slaapkamer",
-                "path": "slaapkamer",
-                "icon": "mdi:bed",
-                "type": "sections",
-                "sections": [
-                    {
-                        "type": "grid",
-                        "cards": [
-                            {"type": "custom:mushroom-title-card", "title": "🛏️ Slaapkamer", "subtitle": "Demo ruimte"},
-                            {"type": "markdown", "content": "# Slaapkamer\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"},
-                        ],
-                    }
-                ],
-            },
-            {
-                "title": "Zolder",
-                "path": "zolder",
-                "icon": "mdi:home-roof",
-                "type": "sections",
-                "sections": [
-                    {
-                        "type": "grid",
-                        "cards": [
-                            {"type": "custom:mushroom-title-card", "title": "🏠 Zolder", "subtitle": "Demo ruimte"},
-                            {"type": "markdown", "content": "# Zolder\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"},
-                        ],
-                    }
-                ],
-            },
-        ]
-        dashboard["views"].extend(demo_views)
-
-    return dashboard
+# -----------------------------------------------------------------------------
+# API endpoints
+# -----------------------------------------------------------------------------
+@app.route("/", methods=["GET"])
+def index() -> Response:
+    html = HTML_PAGE.replace("__APP_NAME__", APP_NAME).replace("__APP_VERSION__", APP_VERSION)
+    return Response(html, mimetype="text/html")
 
 
-# Production default: area-based
-def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
-    return build_area_based_dashboard(dashboard_title)
-
-
-# =========================
-# Validation / Debug endpoints
-# =========================
-def validate_configuration_yaml() -> Tuple[bool, str, Dict[str, Any]]:
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    result: Dict[str, Any] = {
-        "exists": False,
-        "readable": False,
-        "valid_yaml": False,
-        "has_lovelace": False,
-        "lovelace_mode": None,
-        "dashboard_count": 0,
-        "errors": [],
-    }
-
-    if not os.path.exists(config_yaml_path):
-        result["errors"].append("configuration.yaml bestaat niet")
-        return False, "Configuration.yaml niet gevonden", result
-
-    result["exists"] = True
-
-    try:
-        with open(config_yaml_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        result["readable"] = True
-    except Exception as e:
-        result["errors"].append(f"Niet leesbaar: {e}")
-        return False, "Kan configuration.yaml niet lezen", result
-
-    try:
-        config = yaml.safe_load(content) or {}
-        result["valid_yaml"] = True
-    except Exception as e:
-        result["errors"].append(f"Ongeldige YAML: {e}")
-        return False, "Ongeldige YAML syntax", result
-
-    if isinstance(config.get("lovelace"), dict):
-        result["has_lovelace"] = True
-        lovelace = config["lovelace"]
-        result["lovelace_mode"] = lovelace.get("mode")
-
-        if isinstance(lovelace.get("dashboards"), dict):
-            result["dashboard_count"] = len(lovelace["dashboards"])
-
-    if not result["has_lovelace"]:
-        return False, "Lovelace sectie ontbreekt", result
-
-    if result["lovelace_mode"] != "yaml":
-        result["errors"].append(f"Lovelace mode is '{result['lovelace_mode']}' (moet 'yaml' zijn)")
-        return False, "Lovelace mode niet correct", result
-
-    return True, "Configuration.yaml is correct", result
-
-
-# =========================
-# API: config/status
-# =========================
-@app.route("/api/config", methods=["GET"])
-def api_config():
-    ok, msg = conn.probe(force=True)
-
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    response_data: Dict[str, Any] = {
-        "app_name": APP_NAME,
-        "app_version": APP_VERSION,
-        "ha_ok": bool(ok),
-        "ha_message": msg,
-        "active_mode": conn.active_mode,
-        "active_base_url": conn.active_base_url,
-        "configured_config_path": CONFIGURED_CONFIG_PATH,
-        "active_config_path": HA_CONFIG_PATH,
-        "dashboards_path": DASHBOARDS_PATH,
-        "config_yaml_path": config_yaml_path,
-        "config_yaml_exists": os.path.exists(config_yaml_path),
-        "config_yaml_writable": os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False,
-        "server_time": datetime.now().isoformat(timespec="seconds"),
-        "mushroom_installed": mushroom_installed(),
-        "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
-        "options_json_found": os.path.exists(ADDON_OPTIONS_PATH),
-        "options_json_path": ADDON_OPTIONS_PATH,
-        "token_debug": conn.token_debug,
-    }
-
-    if not ok:
-        response_data["probe_attempts"] = conn.probe_attempts
-        response_data["detailed_errors"] = [
-            {
-                "url": attempt.get("url"),
-                "mode": attempt.get("mode"),
-                "error": attempt.get("error"),
-                "status_code": attempt.get("status_code"),
-                "content_type": attempt.get("content_type"),
-                "response_preview": (attempt.get("response_text", "") or "")[:200],
-            }
-            for attempt in conn.probe_attempts
-        ]
-
-    return jsonify(response_data)
-
-
-@app.route("/api/debug/connection", methods=["GET"])
-def api_debug_connection():
-    ok, msg = conn.probe(force=True)
-
-    debug_data = {
-        "connection_ok": ok,
-        "connection_message": msg,
-        "active_connection": {
-            "url": conn.active_base_url,
-            "mode": conn.active_mode,
-            "has_token": bool(conn.active_token),
-            "token_length": len(conn.active_token) if conn.active_token else 0,
-        },
-        "token_discovery": conn.token_debug,
-        "probe_attempts": conn.probe_attempts,
-        "environment": {
-            "SUPERVISOR_TOKEN": bool(os.environ.get("SUPERVISOR_TOKEN")),
-            "HOMEASSISTANT_TOKEN": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
-            "HA_CONFIG_PATH": HA_CONFIG_PATH,
-            "ADDON_OPTIONS_PATH": ADDON_OPTIONS_PATH,
-        },
-        "options_json": _read_options_json(),
-        "urls_tried": HA_URLS,
-    }
-
-    return jsonify(debug_data), 200
-
-
-@app.route("/api/debug/dashboards", methods=["GET"])
-def api_debug_dashboards():
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    debug_info: Dict[str, Any] = {
-        "config_yaml_exists": os.path.exists(config_yaml_path),
-        "config_yaml_path": config_yaml_path,
-        "dashboards_path": DASHBOARDS_PATH,
-        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
-    }
-
-    if os.path.exists(config_yaml_path):
-        try:
-            with open(config_yaml_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
-            debug_info["config_yaml_content"] = config
-            debug_info["lovelace_config"] = config.get("lovelace", {})
-        except Exception as e:
-            debug_info["config_yaml_error"] = str(e)
-
-    try:
-        files = list_yaml_files(DASHBOARDS_PATH)
-        debug_info["dashboard_files"] = files
-        debug_info["dashboard_files_count"] = len(files)
-    except Exception as e:
-        debug_info["dashboard_files_error"] = str(e)
-
-    try:
-        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
-        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
-    except Exception as e:
-        debug_info["permissions_error"] = str(e)
-
-    return jsonify(debug_info), 200
-
-
-@app.route("/api/debug/config_yaml", methods=["GET"])
-def api_debug_config_yaml():
-    valid, msg, details = validate_configuration_yaml()
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    preview: Optional[str] = None
-    if os.path.exists(config_yaml_path):
-        try:
-            with open(config_yaml_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            preview = "".join(lines[:50])
-            if len(lines) > 50:
-                preview += f"\n... ({len(lines) - 50} more lines)"
-        except Exception as e:
-            preview = f"Error reading: {e}"
-
-    return jsonify({"valid": valid, "message": msg, "details": details, "path": config_yaml_path, "preview": preview}), 200
-
-
-# =========================
-# API: init lovelace
-# =========================
-@app.route("/api/init_lovelace", methods=["POST"])
-def api_init_lovelace():
-    try:
-        ok, msg = ensure_lovelace_config()
-        if ok:
-            ha_call_service("homeassistant", "reload_core_config", {})
-            return jsonify({"success": True, "message": msg, "config_path": os.path.join(HA_CONFIG_PATH, "configuration.yaml")}), 200
-        return jsonify({"success": False, "error": msg}), 400
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-# =========================
-# API: setup (YAML mode safe)
-# =========================
 @app.route("/api/setup", methods=["POST"])
 def api_setup():
     ok, msg = conn.probe(force=True)
@@ -1279,6 +941,7 @@ def api_setup():
     density = (data.get("density") or "comfy").strip()
 
     steps: List[str] = []
+
     try:
         ok_lovelace, msg_lovelace = ensure_lovelace_config()
         steps.append(f"✅ {msg_lovelace}" if ok_lovelace else f"⚠️ {msg_lovelace}")
@@ -1291,52 +954,15 @@ def api_setup():
         ha_call_service("homeassistant", "reload_core_config", {})
         steps.append("✅ Core config herladen")
         time.sleep(2)
-        steps.append("✅ Configuratie herladen (YAML mode)")
+        steps.append("✅ Setup compleet - ververs je browser (F5)")
 
         return jsonify({"ok": True, "steps": steps}), 200
     except Exception as e:
-        err = str(e)
-        print(f"❌ Setup error: {err}")
-        return jsonify({"ok": False, "error": err, "steps": steps}), 500
+        error_msg = str(e)
+        print(f"❌ Setup error: {error_msg}")
+        return jsonify({"ok": False, "error": error_msg, "steps": steps}), 500
 
 
-# =========================
-# API: create demo dashboard
-# =========================
-@app.route("/api/create_demo", methods=["POST"])
-def api_create_demo():
-    ok, msg = conn.probe(force=True)
-    if not ok:
-        return jsonify({"success": False, "error": msg}), 400
-
-    title = "WOW Demo Dashboard"
-    dash = build_comprehensive_demo_dashboard(title)
-    code = safe_yaml_dump(dash)
-
-    fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
-    write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
-
-    reg_msg = register_dashboard_in_lovelace(fn, title)
-
-    try:
-        ha_call_service("homeassistant", "reload_core_config", {})
-        time.sleep(2)
-    except Exception as e:
-        print(f"⚠️ Reload warning: {e}")
-
-    return jsonify(
-        {
-            "success": True,
-            "filename": fn,
-            "register": reg_msg,
-            "message": "Dashboard aangemaakt. Ververs je browser (F5) als het niet meteen verschijnt.",
-        }
-    ), 200
-
-
-# =========================
-# API: create dashboards (supports type)
-# =========================
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     ok, msg = conn.probe(force=True)
@@ -1367,21 +993,16 @@ def api_create_dashboards():
     except Exception as e:
         print(f"⚠️ Reload warning: {e}")
 
-    return jsonify(
-        {
-            "success": True,
-            "filename": fn,
-            "title": base_title,
-            "type": dashboard_type,
-            "register": reg_msg,
-            "message": f"Dashboard '{base_title}' aangemaakt! ({len(dash.get('views', []))} pagina's)",
-        }
-    ), 200
+    return jsonify({
+        "success": True,
+        "filename": fn,
+        "title": base_title,
+        "type": dashboard_type,
+        "register": reg_msg,
+        "message": f"Dashboard '{base_title}' aangemaakt! ({len(dash.get('views', []))} pagina's)"
+    }), 200
 
 
-# =========================
-# API: reload (YAML safe)
-# =========================
 @app.route("/api/reload_lovelace", methods=["POST"])
 def api_reload_lovelace():
     try:
@@ -1391,100 +1012,121 @@ def api_reload_lovelace():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# =========================
+@app.route("/api/config", methods=["GET"])
+def api_config():
+    ok, msg = conn.probe(force=True)
+
+    response_data = {
+        "app_name": APP_NAME,
+        "app_version": APP_VERSION,
+        "ha_ok": bool(ok),
+        "ha_message": msg,
+        "active_mode": conn.active_mode,
+        "active_base_url": conn.active_base_url,
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+        "mushroom_installed": mushroom_installed(),
+        "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
+        "token_debug": conn.token_debug,
+    }
+
+    if not ok:
+        response_data["probe_attempts"] = conn.probe_attempts
+        response_data["detailed_errors"] = [
+            {
+                "url": attempt.get("url"),
+                "mode": attempt.get("mode"),
+                "error": attempt.get("error"),
+                "status_code": attempt.get("status_code"),
+                "content_type": attempt.get("content_type"),
+                "response_preview": (attempt.get("response_text", "") or "")[:200],
+            }
+            for attempt in conn.probe_attempts
+        ]
+
+    return jsonify(response_data), 200
+
+
+# -----------------------------------------------------------------------------
 # HTML UI
-# =========================
-HTML_PAGE = r"""
-<!doctype html>
-<html>
+# -----------------------------------------------------------------------------
+HTML_PAGE = """<!DOCTYPE html>
+<html lang="nl">
 <head>
-  <meta charset="utf-8" />
-  <title>Dashboard Maker</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>__APP_NAME__</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-  </style>
 </head>
-<body class="bg-slate-50 text-slate-900">
-  <div class="max-w-3xl mx-auto p-5">
-    <div class="bg-white rounded-2xl shadow p-5">
-      <div class="flex items-center justify-between gap-3 flex-wrap">
+<body class="bg-gradient-to-br from-slate-50 to-indigo-50 min-h-screen p-4">
+  <div class="max-w-5xl mx-auto">
+    <div class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 mb-6">
+      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
-          <div class="text-xl font-bold">Dashboard Maker</div>
-          <div class="text-xs text-slate-500">YAML mode • Mushroom • Multi-page dashboards</div>
+          <h1 class="text-3xl sm:text-4xl font-bold text-indigo-900">🧩 __APP_NAME__</h1>
+          <p class="text-gray-600 mt-2">Maak multi-page dashboards (Home + per ruimte) met Mushroom cards.</p>
+          <p class="text-xs text-gray-500 mt-1">Versie: <span class="font-mono">__APP_VERSION__</span></p>
         </div>
-        <div class="flex gap-2 flex-wrap">
-          <button onclick="init()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
-          <button onclick="openConnectionDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔍 Verbinding Test</button>
-          <button onclick="openDashboardDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔍 Dashboard Check</button>
-        </div>
-      </div>
-
-      <div class="mt-4 flex items-center gap-3">
-        <div id="statusDot" class="w-3 h-3 rounded-full bg-yellow-400"></div>
-        <div id="statusText" class="text-sm font-semibold">Verbinden…</div>
-      </div>
-
-      <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div class="border rounded-xl p-3">
-          <div class="font-semibold text-sm">1) Verbinding</div>
-          <div id="chkEngine" class="text-xs mt-1 text-slate-600">…</div>
-        </div>
-        <div class="border rounded-xl p-3">
-          <div class="font-semibold text-sm">2) Mushroom</div>
-          <div id="chkCards" class="text-xs mt-1 text-slate-600">…</div>
-        </div>
-        <div class="border rounded-xl p-3">
-          <div class="font-semibold text-sm">3) Theme</div>
-          <div id="chkStyle" class="text-xs mt-1 text-slate-600">…</div>
+        <div class="flex flex-col items-start sm:items-end gap-2">
+          <div id="status" class="text-sm">
+            <span class="inline-block w-3 h-3 bg-gray-400 rounded-full mr-2 animate-pulse"></span>
+            <span>Verbinden…</span>
+          </div>
         </div>
       </div>
 
-      <div class="mt-5 border-t pt-5">
-        <div class="text-base font-bold">Stap A — Setup</div>
-        <div class="text-xs text-slate-500 mt-1">
-          Installeert Mushroom (indien nodig) + theme. In YAML mode moet je resources soms handmatig toevoegen.
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+        <div class="bg-white border border-slate-200 rounded-xl p-4">
+          <div class="font-semibold">Verbinding</div>
+          <div id="chkEngine" class="text-sm mt-1 text-slate-500">⏳ controleren…</div>
         </div>
-
-        <div class="mt-3 flex gap-2 flex-wrap">
-          <button onclick="runSetup()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-semibold">⚡ Setup uitvoeren</button>
-          <button onclick="initLovelace()" class="bg-slate-100 hover:bg-slate-200 text-slate-900 px-4 py-2 rounded-xl font-semibold">🔧 Lovelace init</button>
+        <div class="bg-white border border-slate-200 rounded-xl p-4">
+          <div class="font-semibold">Mushroom</div>
+          <div id="chkCards" class="text-sm mt-1 text-slate-500">⏳ wachten…</div>
         </div>
+        <div class="bg-white border border-slate-200 rounded-xl p-4">
+          <div class="font-semibold">Theme</div>
+          <div id="chkStyle" class="text-sm mt-1 text-slate-500">⏳ wachten…</div>
+        </div>
+      </div>
 
-        <!-- Quick Copy sectie -->
-        <div class="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
-          <details class="cursor-pointer">
-            <summary class="font-semibold text-blue-900 hover:text-blue-700">
-              📋 Handmatige Mushroom Setup (kopieer & plak)
-            </summary>
-            <div class="mt-3 space-y-3">
-              <p class="text-sm text-gray-700">Voeg dit toe aan <code class="bg-white px-2 py-1 rounded">/config/configuration.yaml</code>:</p>
+      <div class="mt-4 flex flex-col sm:flex-row gap-3">
+        <button onclick="runSetup()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
+          🚀 Alles automatisch instellen
+        </button>
+      </div>
 
-              <div class="relative">
-                <pre class="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-xs font-mono" id="resourcesCodeBlock">lovelace:
+      <!-- ✅ Fix 3: Quick Copy sectie (NA setup button, VOOR 'Maak jouw dashboard') -->
+      <div class="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
+        <details class="cursor-pointer">
+          <summary class="font-semibold text-blue-900 hover:text-blue-700">
+            📋 Handmatige Mushroom Setup (kopieer & plak)
+          </summary>
+          <div class="mt-3 space-y-3">
+            <p class="text-sm text-gray-700">Voeg dit toe aan <code class="bg-white px-2 py-1 rounded">/config/configuration.yaml</code>:</p>
+
+            <div class="relative">
+<pre class="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-xs font-mono" id="resourcesCodeBlock">lovelace:
   mode: yaml
   resources:
     - url: /local/community/lovelace-mushroom/dist/mushroom.js
       type: module
   dashboards: {}</pre>
-                <button onclick="copyResourcesCodeFromBlock()" class="absolute top-2 right-2 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs font-semibold">
-                  📋 Kopieer
-                </button>
-              </div>
-
-              <div class="text-xs text-gray-600 bg-yellow-50 border border-yellow-200 p-3 rounded-lg">
-                <strong>⚠️ Daarna:</strong><br>
-                • Ga naar <strong>Ontwikkelaarstools</strong> → <strong>YAML</strong> → <strong>"ALLE YAML-CONFIGURATIE HERLADEN"</strong><br>
-                • Of herstart Home Assistant
-              </div>
+              <button onclick="copyResourcesCodeFromBlock()" class="absolute top-2 right-2 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs font-semibold">
+                📋 Kopieer
+              </button>
             </div>
-          </details>
-        </div>
+
+            <div class="text-xs text-gray-600 bg-yellow-50 border border-yellow-200 p-3 rounded-lg">
+              <strong>⚠️ Daarna:</strong><br>
+              • Ga naar <strong>Ontwikkelaarstools</strong> → <strong>YAML</strong> → <strong>"ALLE YAML-CONFIGURATIE HERLADEN"</strong><br>
+              • Of herstart Home Assistant
+            </div>
+          </div>
+        </details>
       </div>
 
-      <div class="mt-5 border-t pt-5">
-        <div class="text-base font-bold">Stap B — Maak een dashboard</div>
+      <div class="mt-6 border border-slate-200 rounded-2xl p-5">
+        <h2 class="text-xl font-bold text-slate-900">Maak jouw dashboard</h2>
 
         <div class="mt-4">
           <label class="block text-base font-semibold text-gray-700 mb-2">Dashboard Type</label>
@@ -1503,193 +1145,63 @@ HTML_PAGE = r"""
                  class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
         </div>
 
-        <div class="mt-3 flex gap-2 flex-wrap">
-          <button onclick="createDemo()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-semibold">🎨 Demo dashboard</button>
-          <button onclick="createMine()" class="bg-slate-900 hover:bg-slate-950 text-white px-4 py-2 rounded-xl font-semibold">➕ Maak mijn dashboard</button>
-        </div>
-
-        <div class="mt-3 text-xs text-slate-500">
-          Tip: na het aanmaken: wacht even en druk op <b>F5</b> om de sidebar te verversen.
+        <div class="mt-3 flex flex-col sm:flex-row gap-3">
+          <button onclick="createMine()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
+            🎨 Maak mijn dashboard
+          </button>
         </div>
       </div>
-
-    </div>
-
-    <div class="text-center text-xs text-slate-500 mt-4">
-      Dashboard Maker • <span id="ver"></span>
     </div>
   </div>
 
 <script>
-  var API_BASE = '';
+  // Ingress-safe base path
+  var API_BASE = (function() {
+    var p = window.location.pathname || '/';
+    if (!p.endsWith('/')) p = p.substring(0, p.lastIndexOf('/') + 1);
+    if (p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  })();
 
   function setStatus(text, color) {
-    document.getElementById('statusText').textContent = text;
-    var dot = document.getElementById('statusDot');
-    dot.className = 'w-3 h-3 rounded-full ' + (color === 'green' ? 'bg-green-500' : (color === 'red' ? 'bg-red-500' : 'bg-yellow-400'));
+    color = color || 'gray';
+    document.getElementById('status').innerHTML =
+      '<span class="inline-block w-3 h-3 bg-' + color + '-500 rounded-full mr-2"></span>' +
+      '<span class="text-' + color + '-700">' + text + '</span>';
   }
 
   function setCheck(id, ok, msg) {
     var el = document.getElementById(id);
     el.textContent = (ok ? '✅ ' : '❌ ') + msg;
-    el.className = 'text-xs mt-1 ' + (ok ? 'text-emerald-700' : 'text-red-700');
+    el.className = 'text-sm mt-1 ' + (ok ? 'text-green-700' : 'text-red-700');
   }
 
   async function fetchJsonSafe(url, opts) {
     var res = await fetch(url, opts || {});
-    var txt = await res.text();
+    var text = await res.text();
     try {
-      return { ok: res.ok, status: res.status, data: JSON.parse(txt), raw: txt };
+      var data = JSON.parse(text);
+      return { ok: res.ok, status: res.status, data: data, raw: text };
     } catch (e) {
-      return { ok: false, status: res.status, parse_error: e.message, raw: txt };
+      console.error('❌ Non-JSON response for', url, 'status', res.status, 'preview:', text.substring(0, 300));
+      return { ok: false, status: res.status, data: null, raw: text, parse_error: e.message };
     }
   }
 
-  async function init() {
-    setStatus('Verbinden…', 'yellow');
-    try {
-      var cfgRes = await fetch(API_BASE + '/api/config');
-      var cfgTxt = await cfgRes.text();
-      var cfg;
-      try { cfg = JSON.parse(cfgTxt); } catch(e) {
-        setStatus('Verbinding mislukt', 'red');
-        setCheck('chkEngine', false, 'Non-JSON response van add-on');
-        setCheck('chkCards', false, 'Kan niet verbinden');
-        setCheck('chkStyle', false, 'Kan niet verbinden');
-        console.error('Non-JSON /api/config:', cfgTxt);
-        return;
-      }
-
-      document.getElementById('ver').textContent = (cfg.app_name || '') + ' v' + (cfg.app_version || '');
-
-      if (cfg.ha_ok) {
-        setStatus('Verbonden (' + (cfg.active_mode || 'ok') + ')', 'green');
-        setCheck('chkEngine', true, 'OK');
-      } else {
-        setStatus('Geen verbinding', 'red');
-        var errorMsg = cfg.ha_message || 'Geen verbinding';
-        if (errorMsg.length > 100) errorMsg = errorMsg.substring(0,100) + '...';
-        setCheck('chkEngine', false, errorMsg);
-
-        console.error('Connection failed:', cfg.ha_message);
-        if (cfg.detailed_errors) console.error('Detailed errors:', cfg.detailed_errors);
-        if (cfg.probe_attempts) console.error('Probe attempts:', cfg.probe_attempts);
-      }
-
-      setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
-      setCheck('chkStyle', true, cfg.theme_file_exists ? 'Al aanwezig' : 'Klaar om te installeren');
-    } catch (e) {
-      console.error('Init error:', e);
-      setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden: ' + e.message);
-      setCheck('chkCards', false, 'Kan niet verbinden');
-      setCheck('chkStyle', false, 'Kan niet verbinden');
-    }
-  }
-
-  document.getElementById('dashboardType').addEventListener('change', function(e) {
-    var help = document.getElementById('dashboardTypeHelp');
-    var type = e.target.value;
-    if (type === 'area_based') help.textContent = 'Multi-page dashboard met Home overzicht + per ruimte details';
-    else if (type === 'simple') help.textContent = 'Alles op één pagina, perfect voor beginners';
+  // Help text for type select
+  document.addEventListener('DOMContentLoaded', function() {
+    var el = document.getElementById('dashboardType');
+    if (!el) return;
+    el.addEventListener('change', function(e) {
+      var help = document.getElementById('dashboardTypeHelp');
+      var type = e.target.value;
+      if (type === 'area_based') help.textContent = 'Multi-page dashboard met Home overzicht + per ruimte details';
+      else if (type === 'simple') help.textContent = 'Alles op één pagina, perfect voor beginners';
+      else help.textContent = '';
+    });
   });
 
-  async function createDemo() {
-    try {
-      setStatus('Demo maken...', 'yellow');
-      var res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
-      var data = await res.json();
-      if (!res.ok || !data.success) {
-        alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
-        setStatus('Demo mislukt', 'red');
-        return;
-      }
-      setStatus('Demo gereed!', 'green');
-
-      var msg = '✅ Demo dashboard aangemaakt!\\n\\n';
-      msg += '📁 Bestand: ' + data.filename + '\\n';
-      msg += '📌 Titel: WOW Demo Dashboard\\n\\n';
-      msg += '🔄 BELANGRIJK:\\n';
-      msg += '1. Wacht 5 seconden\\n';
-      msg += '2. Druk op F5 (of refresh je browser)\\n';
-      msg += '3. Check je sidebar voor het nieuwe dashboard\\n\\n';
-      msg += '💡 Zie je het niet? Gebruik "Dashboard Check" knop.';
-
-      alert(msg);
-      init();
-    } catch (e) {
-      console.error(e);
-      setStatus('Demo mislukt', 'red');
-      alert('❌ Demo mislukt.');
-    }
-  }
-
-  async function createMine() {
-    var base_title = document.getElementById('dashName').value.trim();
-    if (!base_title) {
-      alert('❌ Vul een naam in.');
-      return;
-    }
-
-    try {
-      setStatus('Dashboard maken...', 'yellow');
-
-      var dashboardType = document.getElementById('dashboardType') ? document.getElementById('dashboardType').value : 'area_based';
-
-      var res = await fetch(API_BASE + '/api/create_dashboards', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          base_title: base_title,
-          dashboard_type: dashboardType
-        })
-      });
-
-      var data = await res.json();
-      if (!res.ok || !data.success) {
-        alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
-        setStatus('Maken mislukt', 'red');
-        return;
-      }
-
-      setStatus('Dashboard gereed!', 'green');
-
-      var msg = '✅ Dashboard aangemaakt!\\n\\n';
-      msg += '📁 ' + data.title + '\\n';
-      msg += '📄 Type: ' + data.type + '\\n';
-      msg += '🧾 Bestand: ' + data.filename + '\\n\\n';
-      msg += '🔄 Ververs je browser (F5) en check de sidebar!\\n';
-
-      alert(msg);
-      init();
-    } catch (e) {
-      console.error(e);
-      setStatus('Maken mislukt', 'red');
-      alert('❌ Maken mislukt.');
-    }
-  }
-
-  async function initLovelace() {
-    if (!confirm('Dit voegt de lovelace configuratie toe aan configuration.yaml.\\n\\nEr wordt automatisch een backup gemaakt.\\n\\nDoorgaan?')) return;
-    try {
-      setStatus('Lovelace initialiseren...', 'yellow');
-      var res = await fetch(API_BASE + '/api/init_lovelace', { method: 'POST' });
-      var data = await res.json();
-      if (!res.ok || !data.success) {
-        alert('❌ Initialisatie mislukt: ' + (data.error || 'Onbekend'));
-        setStatus('Initialisatie mislukt', 'red');
-        return;
-      }
-      setStatus('Lovelace geïnitialiseerd', 'green');
-      alert('✅ Lovelace configuratie toegevoegd!\\n\\n' + data.message + '\\n\\nPad: ' + data.config_path);
-      init();
-    } catch (e) {
-      console.error(e);
-      setStatus('Initialisatie mislukt', 'red');
-      alert('❌ Initialisatie mislukt.');
-    }
-  }
-
+  // ✅ Fix 2: Vervang runSetup + showSetupResult + copy functies
   async function runSetup() {
     try {
       setStatus('Setup...', 'yellow');
@@ -1707,6 +1219,7 @@ HTML_PAGE = r"""
         return;
       }
 
+      // ✅ Toon resultaat met kopieerbare code
       showSetupResult(r.data.steps);
       setStatus('Setup klaar', 'green');
       init();
@@ -1730,7 +1243,9 @@ HTML_PAGE = r"""
 
     if (steps && steps.length > 0) {
       html += '<div style="margin-bottom: 15px;">';
-      steps.forEach(function(step) { html += '<div style="margin: 5px 0;">• ' + step + '</div>'; });
+      steps.forEach(function(step) {
+        html += '<div style="margin: 5px 0;">• ' + step + '</div>';
+      });
       html += '</div>';
     }
 
@@ -1752,8 +1267,14 @@ HTML_PAGE = r"""
 
     html += '</div>';
 
+    // Fallback modal
     var modal = document.createElement('div');
-    modal.innerHTML = '<div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 9999; display: flex; align-items: center; justify-content: center;" onclick="this.remove()"><div style="background: white; padding: 30px; border-radius: 15px; max-width: 90%; max-height: 90%; overflow-y: auto;" onclick="event.stopPropagation()">' + html + '<button onclick="this.closest(\\'div[style*=fixed]\\').remove()" style="margin-top: 20px; background: #4f46e5; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Sluiten</button></div></div>';
+    modal.innerHTML =
+      '<div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 9999; display: flex; align-items: center; justify-content: center;" onclick="this.remove()">' +
+      '<div style="background: white; padding: 30px; border-radius: 15px; max-width: 90%; max-height: 90%; overflow-y: auto;" onclick="event.stopPropagation()">' +
+      html +
+      '<button onclick="this.closest(\\'div[style*=fixed]\\').remove()" style="margin-top: 20px; background: #4f46e5; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Sluiten</button>' +
+      '</div></div>';
     document.body.appendChild(modal);
   }
 
@@ -1764,6 +1285,7 @@ HTML_PAGE = r"""
     - url: /local/community/lovelace-mushroom/dist/mushroom.js
       type: module
   dashboards: {}`;
+
     navigator.clipboard.writeText(code).then(function() {
       alert('📋 Gekopieerd naar klembord!');
     }).catch(function() {
@@ -1779,6 +1301,7 @@ HTML_PAGE = r"""
     });
   };
 
+  // ✅ Fix 3: copy from quick block
   function copyResourcesCodeFromBlock() {
     var code = document.getElementById('resourcesCodeBlock').textContent;
     navigator.clipboard.writeText(code).then(function() {
@@ -1795,64 +1318,77 @@ HTML_PAGE = r"""
       alert('📋 Gekopieerd! Plak in /config/configuration.yaml');
     });
   }
+  window.copyResourcesCodeFromBlock = copyResourcesCodeFromBlock;
 
-  async function openDashboardDebug() {
+  async function createMine() {
+    var base_title = document.getElementById('dashName').value.trim();
+    if (!base_title) {
+      alert('❌ Vul een naam in.');
+      return;
+    }
+
     try {
-      var res = await fetch(API_BASE + '/api/debug/dashboards');
-      var data = await res.json();
+      setStatus('Dashboard maken...', 'yellow');
+      var dashboardType = document.getElementById('dashboardType').value || 'area_based';
 
-      var msg = '🔍 Dashboard Debug Info\\n\\n';
-      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\\n';
-      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\\n';
-      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\\n\\n';
+      var r = await fetchJsonSafe(API_BASE + '/api/create_dashboards', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ base_title: base_title, dashboard_type: dashboardType })
+      });
 
-      if (data.lovelace_config) {
-        msg += '⚙️ Lovelace config:\\n';
-        msg += JSON.stringify(data.lovelace_config, null, 2) + '\\n\\n';
+      if (!r.ok || !r.data || !r.data.success) {
+        alert('❌ Maken mislukt: ' + (r.data && r.data.error ? r.data.error : (r.parse_error || 'Non-JSON response')));
+        setStatus('Maken mislukt', 'red');
+        return;
       }
 
-      if (data.dashboard_files && data.dashboard_files.length > 0) {
-        msg += '📋 Found dashboards:\\n';
-        data.dashboard_files.forEach(f => msg += '  - ' + f + '\\n');
-      }
-
-      alert(msg);
-      console.log('Full debug data:', data);
+      setStatus('Dashboard gereed!', 'green');
+      alert('✅ Dashboard aangemaakt!\\n\\n' + r.data.message + '\\n\\n➡️ Ververs je browser (F5) en check de sidebar!');
     } catch (e) {
       console.error(e);
-      alert('❌ Debug check failed');
+      setStatus('Maken mislukt', 'red');
+      alert('❌ Maken mislukt: ' + e.message);
     }
   }
 
-  async function openConnectionDebug() {
+  async function init() {
+    setStatus('Verbinden…', 'yellow');
     try {
-      setStatus('Verbinding testen...', 'yellow');
-      var res = await fetch(API_BASE + '/api/debug/connection');
-      var data = await res.json();
+      var cfgRes = await fetchJsonSafe(API_BASE + '/api/config');
 
-      console.log('Full connection debug:', data);
-
-      var msg = '🔍 Verbinding Debug\\n\\n';
-      msg += 'Status: ' + (data.connection_ok ? '✅ OK' : '❌ FAILED') + '\\n';
-      msg += 'Mode: ' + (data.active_connection.mode || 'none') + '\\n';
-      msg += 'URL: ' + (data.active_connection.url || 'none') + '\\n\\n';
-
-      if (!data.connection_ok && data.probe_attempts) {
-        msg += 'Pogingen:\\n';
-        data.probe_attempts.forEach(function(att, i) {
-          msg += (i+1) + '. ' + att.mode + ' @ ' + att.url + '\\n';
-          msg += '   Error: ' + (att.error || 'unknown') + '\\n';
-          if (att.status_code) msg += '   HTTP: ' + att.status_code + '\\n';
-        });
+      if (!cfgRes.data) {
+        setStatus('Verbinding mislukt', 'red');
+        setCheck('chkEngine', false, 'Kan niet verbinden: ' + (cfgRes.parse_error || 'Non-JSON response'));
+        setCheck('chkCards', false, 'Kan niet verbinden');
+        setCheck('chkStyle', false, 'Kan niet verbinden');
+        return;
       }
 
-      msg += '\\n💡 Check browser console voor volledige details';
-      alert(msg);
+      var cfg = cfgRes.data;
 
-      setStatus(data.connection_ok ? 'Verbonden' : 'Geen verbinding', data.connection_ok ? 'green' : 'red');
+      if (cfg.ha_ok) {
+        setStatus('Verbonden (' + (cfg.active_mode || 'ok') + ')', 'green');
+        setCheck('chkEngine', true, 'OK');
+      } else {
+        setStatus('Geen verbinding', 'red');
+        var errorMsg = cfg.ha_message || 'Geen verbinding';
+        if (errorMsg.length > 100) errorMsg = errorMsg.substring(0, 100) + '...';
+        setCheck('chkEngine', false, errorMsg);
+
+        console.error('Connection failed:', cfg.ha_message);
+        if (cfg.detailed_errors) console.error('Detailed errors:', cfg.detailed_errors);
+        if (cfg.probe_attempts) console.error('Probe attempts:', cfg.probe_attempts);
+      }
+
+      setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
+      setCheck('chkStyle', true, cfg.theme_file_exists ? 'Al aanwezig' : 'Klaar om te installeren');
     } catch (e) {
-      console.error(e);
-      alert('❌ Debug check mislukt: ' + e.message);
+      console.error('Init error:', e);
+      setStatus('Verbinding mislukt', 'red');
+      setCheck('chkEngine', false, 'Kan niet verbinden: ' + e.message);
+      setCheck('chkCards', false, 'Kan niet verbinden');
+      setCheck('chkStyle', false, 'Kan niet verbinden');
     }
   }
 
@@ -1863,14 +1399,11 @@ HTML_PAGE = r"""
 """
 
 
-@app.route("/", methods=["GET"])
-def index():
-    return Response(HTML_PAGE, mimetype="text/html")
-
-
-# =========================
-# Entrypoint
-# =========================
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # For local debugging. In HA add-on, ingress usually handles serving.
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8099")))
+    ensure_dir(DASHBOARDS_PATH)
+    ensure_dir(WWW_PATH)
+    ensure_dir(COMMUNITY_PATH)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8099")), debug=False)

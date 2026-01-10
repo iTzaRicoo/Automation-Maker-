@@ -32,19 +32,6 @@
       border-radius: 999px;
       animation: spin 700ms linear infinite;
     }
-
-    .progressbar {
-      height: 10px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: rgba(15,23,42,0.08);
-    }
-    .progressbar > div {
-      height: 100%;
-      width: 0%;
-      transition: width 350ms ease;
-      background: rgba(15,23,42,0.65);
-    }
   </style>
 </head>
 
@@ -127,8 +114,8 @@
           <option value="sun">Zonsopgang/ondergang</option>
         </select>
         <div id="triggerInputs"></div>
-        
-        <!-- Days selector (shown when trigger is selected) -->
+
+        <!-- Days selector -->
         <div id="daysSelector" class="hidden mt-4 border-2 border-green-200 bg-white rounded-xl p-4">
           <label class="block text-sm font-semibold text-gray-700 mb-2">Op welke dagen? (optioneel)</label>
           <div class="text-xs text-gray-600 mb-3">Selecteer niets voor alle dagen</div>
@@ -193,9 +180,17 @@
 
     <!-- List -->
     <div id="list" class="bg-white rounded-2xl shadow-xl p-6 hidden">
-      <h2 class="text-2xl font-bold text-gray-800 mb-4">
-        Opgeslagen Automations (<span id="count">0</span>)
-      </h2>
+      <div class="flex items-center justify-between gap-3 mb-4">
+        <h2 class="text-2xl font-bold text-gray-800">
+          Opgeslagen Automations (<span id="count">0</span>)
+        </h2>
+        <div class="w-full sm:w-80">
+          <input id="searchBox" type="text" placeholder="Zoek… (bijv. lamp avond, woonkamer, verwarming)"
+                 class="w-full px-4 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:outline-none"
+                 oninput="onSearchInput()" />
+        </div>
+      </div>
+
       <div id="items" class="space-y-3"></div>
     </div>
 
@@ -210,6 +205,10 @@
 
     // ELI5 mode
     let explainLike5 = false;
+
+    // Search debounce
+    let searchTimer = null;
+    let currentQuery = '';
 
     function toggleELI5() {
       explainLike5 = !explainLike5;
@@ -281,7 +280,7 @@
 
       entities = entitiesResult.data;
       setStatus(`Verbonden`, 'green');
-      loadList();
+      loadList(); // initial load
     }
 
     // ----------------------------
@@ -333,6 +332,24 @@
       return [r,g,b];
     }
 
+    function formatWarnings(warnings) {
+      if (!warnings || !warnings.length) return '';
+      return warnings.map(w => {
+        const sev = (w.severity || 'info').toUpperCase();
+        return `- [${sev}] ${w.warning || ''}`;
+      }).join('\n');
+    }
+
+    async function postJSON(url, bodyObj) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(bodyObj),
+      });
+      const data = await resp.json().catch(() => ({}));
+      return { resp, data };
+    }
+
     // ----------------------------
     // Trigger UI
     // ----------------------------
@@ -341,19 +358,24 @@
       const container = document.getElementById('triggerInputs');
       const daysSelector = document.getElementById('daysSelector');
 
-      if (!type) { 
-        container.innerHTML = ''; 
+      if (!type) {
+        container.innerHTML = '';
         daysSelector.classList.add('hidden');
-        return; 
+        return;
       }
-      
+
       daysSelector.classList.remove('hidden');
-      
+
       if (prefill?.days) {
         setTimeout(() => {
           document.querySelectorAll('.day-checkbox').forEach(cb => {
             cb.checked = prefill.days.includes(cb.value);
           });
+        }, 0);
+      } else {
+        // if switching trigger type while editing, don't keep old checks unless explicitly provided
+        setTimeout(() => {
+          if (!prefill) document.querySelectorAll('.day-checkbox').forEach(cb => cb.checked = false);
         }, 0);
       }
 
@@ -470,8 +492,8 @@
             if (prefill?.brightness !== undefined) {
               const br = document.getElementById('lightBrightness');
               const bv = document.getElementById('brightnessValue');
-              if (br) br.value = prefill.brightness;
-              if (bv) bv.textContent = prefill.brightness;
+              if (br) br.value = preillSafeNum(prefill.brightness, 255);
+              if (bv) bv.textContent = preillSafeNum(prefill.brightness, 255);
             }
           }
         }, 0);
@@ -494,6 +516,11 @@
           '<input type="text" id="actionValue" placeholder="scene.naam" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-blue-500 focus:outline-none"/>';
         setTimeout(() => { if (prefill?.value) document.getElementById('actionValue').value = prefill.value; }, 0);
       }
+    }
+
+    function preillSafeNum(v, fallback) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
     }
 
     // ----------------------------
@@ -581,7 +608,6 @@
 
     function stepCard({ icon, title, text, ok, extra }, state = 'done') {
       const border =
-        state === 'pending' ? 'border-slate-200 bg-white' :
         state === 'running' ? 'border-yellow-200 bg-yellow-50' :
         ok ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50';
 
@@ -612,42 +638,27 @@
     }
 
     // ----------------------------
-    // Save automation
+    // Save automation (met confirmation flow)
     // ----------------------------
     function readFormData() {
       const name = document.getElementById('name').value.trim();
       const triggerType = document.getElementById('triggerType').value;
       const actionType = document.getElementById('actionType').value;
 
-      if (!name) {
-        alert('Vul eerst een naam in!');
-        return null;
-      }
-      if (!triggerType) {
-        alert('Kies eerst WANNEER!');
-        return null;
-      }
-      if (!actionType) {
-        alert('Kies eerst DAN!');
-        return null;
-      }
+      if (!name) { alert('Vul eerst een naam in!'); return null; }
+      if (!triggerType) { alert('Kies eerst WANNEER!'); return null; }
+      if (!actionType) { alert('Kies eerst DAN!'); return null; }
 
       const trigger = { type: triggerType };
-      
-      // Get selected days
+
       const selectedDays = Array.from(document.querySelectorAll('.day-checkbox:checked')).map(cb => cb.value);
-      if (selectedDays.length > 0) {
-        trigger.days = selectedDays;
-      }
+      if (selectedDays.length > 0) trigger.days = selectedDays;
 
       if (triggerType === 'time') {
         trigger.value = document.getElementById('triggerValue')?.value || '12:00';
       } else if (triggerType === 'state') {
         trigger.value = document.getElementById('triggerValue')?.value || '';
-        if (!trigger.value) {
-          alert('Kies eerst wat er moet veranderen bij WANNEER!');
-          return null;
-        }
+        if (!trigger.value) { alert('Kies eerst wat er moet veranderen bij WANNEER!'); return null; }
       } else if (triggerType === 'sun') {
         trigger.sunEvent = document.getElementById('sunEvent')?.value || 'sunrise';
         trigger.sunOffset = document.getElementById('sunOffset')?.value || 'after';
@@ -658,10 +669,7 @@
 
       if (actionType === 'turn_on' || actionType === 'turn_off') {
         action.value = document.getElementById('actionValue')?.value || '';
-        if (!action.value) {
-          alert('Kies eerst wat er aan/uit moet bij DAN!');
-          return null;
-        }
+        if (!action.value) { alert('Kies eerst wat er aan/uit moet bij DAN!'); return null; }
 
         if (actionType === 'turn_on' && isLightEntity(action.value)) {
           const colorHex = document.getElementById('lightColor')?.value;
@@ -677,16 +685,10 @@
       } else if (actionType === 'notify') {
         action.value = document.getElementById('actionValue')?.value || '';
         action.service = document.getElementById('notifyService')?.value || 'notify.notify';
-        if (!action.value.trim()) {
-          alert('Vul eerst een tekst in voor de melding!');
-          return null;
-        }
+        if (!action.value.trim()) { alert('Vul eerst een tekst in voor de melding!'); return null; }
       } else if (actionType === 'scene') {
         action.value = document.getElementById('actionValue')?.value || '';
-        if (!action.value) {
-          alert('Vul eerst een scene in!');
-          return null;
-        }
+        if (!action.value) { alert('Vul eerst een scene in!'); return null; }
       }
 
       return { name, trigger, action };
@@ -698,31 +700,63 @@
 
       log(`Saving automation: ${automation.name}`, 'info');
 
-      try {
-        const isEdit = !!editingFilename;
-        const url = isEdit
-          ? `${API_BASE}/api/automation/${editingFilename}`
-          : `${API_BASE}/api/automation`;
-        const method = isEdit ? 'PUT' : 'POST';
+      const isEdit = !!editingFilename;
+      const url = isEdit
+        ? `${API_BASE}/api/automation/${editingFilename}`
+        : `${API_BASE}/api/automation`;
+      const method = isEdit ? 'PUT' : 'POST';
 
-        const response = await fetch(url, {
+      // 1) first attempt without confirmation
+      try {
+        let response = await fetch(url, {
           method,
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ automation }),
+          body: JSON.stringify({ automation, confirmed: false }),
         });
 
-        const result = await response.json();
+        let result = await response.json().catch(() => ({}));
+
+        // confirmation required?
+        if (response.status === 400 && result && result.require_confirmation) {
+          const warningsText = formatWarnings(result.warnings);
+          const ok = confirm(
+            (result.message || 'Er zijn waarschuwingen gevonden.') +
+            '\n\nWaarschuwingen:\n' + warningsText +
+            '\n\nWil je toch doorgaan?'
+          );
+
+          if (!ok) {
+            log('User cancelled after warnings', 'warn');
+            alert('Geannuleerd. Niets opgeslagen.');
+            return;
+          }
+
+          // 2) retry with confirmed: true
+          response = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ automation, confirmed: true }),
+          });
+
+          result = await response.json().catch(() => ({}));
+        }
 
         if (response.ok) {
           log(`Success: ${result.message}`, 'success');
-          alert(result.message);
+
+          if (result.warnings && result.warnings.length) {
+            alert(result.message + '\n\nLet op (info):\n' + formatWarnings(result.warnings));
+          } else {
+            alert(result.message);
+          }
+
           clearForm();
           editingFilename = null;
           hideEditBanner();
           loadList();
         } else {
-          log(`Error: ${result.error}`, 'error');
-          alert(`Fout: ${result.error}`);
+          log(`Error: ${result.error || 'Onbekende fout'}`, 'error');
+          alert(`Fout: ${result.error || 'Onbekende fout'}`);
         }
       } catch (error) {
         log(`Save failed: ${error.message}`, 'error');
@@ -757,7 +791,7 @@
           body: JSON.stringify({ automation }),
         });
 
-        const result = await response.json();
+        const result = await response.json().catch(() => ({}));
 
         stepsContainer.innerHTML = renderActionPreviewCard(automation);
 
@@ -800,20 +834,37 @@
     }
 
     // ----------------------------
-    // List automations
+    // Search + List
     // ----------------------------
+    function onSearchInput() {
+      const q = (document.getElementById('searchBox')?.value || '').trim();
+      currentQuery = q;
+
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => loadList(), 200);
+    }
+
     async function loadList() {
       try {
-        const response = await fetch(`${API_BASE}/api/automations`);
-        const files = await response.json();
+        let files = [];
+
+        if (currentQuery && currentQuery.length > 0) {
+          log(`Searching automations: "${currentQuery}"`, 'info');
+          const { resp, data } = await postJSON(`${API_BASE}/api/automations/search`, { query: currentQuery });
+          if (resp.ok) files = data;
+          else files = [];
+        } else {
+          const response = await fetch(`${API_BASE}/api/automations`);
+          files = await response.json().catch(() => []);
+        }
 
         const listEl = document.getElementById('list');
         const countEl = document.getElementById('count');
         const itemsEl = document.getElementById('items');
 
-        countEl.textContent = files.length;
+        countEl.textContent = (files || []).length;
 
-        if (files.length === 0) {
+        if (!files || files.length === 0) {
           listEl.classList.add('hidden');
           log('No automations found', 'info');
           return;
@@ -823,20 +874,21 @@
         itemsEl.innerHTML = '';
 
         files.forEach(file => {
+          const filename = file.filename || '';
           const card = document.createElement('div');
           card.className = 'border-2 border-gray-200 rounded-xl p-4 hover:border-blue-300 transition-colors';
           card.innerHTML = `
             <div class="flex items-center justify-between">
               <div class="flex-1">
-                <div class="font-semibold text-gray-800">${escapeHtml(file.name)}</div>
-                <div class="text-xs text-gray-500 font-mono mt-1">${escapeHtml(file.filename)}</div>
+                <div class="font-semibold text-gray-800">${escapeHtml(file.name || 'Onbekend')}</div>
+                <div class="text-xs text-gray-500 font-mono mt-1">${escapeHtml(filename)}</div>
               </div>
               <div class="flex gap-2">
-                <button onclick="editAutomation('${escapeHtml(file.filename)}')"
+                <button onclick="editAutomation('${escapeHtml(filename)}')"
                         class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors">
                   ✏️ Bewerken
                 </button>
-                <button onclick="deleteAutomation('${escapeHtml(file.filename)}')"
+                <button onclick="deleteAutomation('${escapeHtml(filename)}')"
                         class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-colors">
                   🗑️ Verwijderen
                 </button>
@@ -856,10 +908,10 @@
       try {
         log(`Loading automation for edit: ${filename}`, 'info');
         const response = await fetch(`${API_BASE}/api/automation/${filename}`);
-        const result = await response.json();
+        const result = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-          alert(`Fout: ${result.error}`);
+          alert(`Fout: ${result.error || 'Onbekende fout'}`);
           return;
         }
 
@@ -884,9 +936,7 @@
     }
 
     async function deleteAutomation(filename) {
-      if (!confirm(`Weet je zeker dat je "${filename}" wilt verwijderen?`)) {
-        return;
-      }
+      if (!confirm(`Weet je zeker dat je "${filename}" wilt verwijderen?`)) return;
 
       try {
         log(`Deleting automation: ${filename}`, 'warn');
@@ -894,7 +944,7 @@
           method: 'DELETE',
         });
 
-        const result = await response.json();
+        const result = await response.json().catch(() => ({}));
 
         if (response.ok) {
           log(`Deleted: ${filename}`, 'success');

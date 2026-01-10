@@ -6,12 +6,21 @@ Goals:
 - Simple REST API for UI (create/update/delete/list/test automations)
 - Plays nice with Home Assistant Ingress (including weird /api/hassio_ingress/... paths)
 - Beginner-friendly test steps (human text) + optional tech details in `extra.tech`
+
+Updates in this version:
+- Advanced Dutch Search endpoint: /api/automations/search
+- Safety checks on create/update with confirmation flow:
+  - infinite loop detection
+  - conflicts detection
+  - dangerous actions requiring confirmation
 """
 
 from __future__ import annotations
 
 import os
 import re
+import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -102,6 +111,305 @@ def reload_automations() -> bool:
 
 
 # -----------------------------------------------------------------------------
+# NIEUWE SECTIE: Advanced Dutch Search
+# -----------------------------------------------------------------------------
+def normalize_dutch_text(text: str) -> str:
+    """Normaliseer Nederlandse tekst voor fuzzy matching."""
+    if not text:
+        return ""
+
+    # Lowercase
+    text = text.lower().strip()
+
+    # Remove accents (é → e, ë → e, etc.)
+    text = "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+    # Common Dutch synonyms/variations
+    replacements = {
+        "licht": "lamp",
+        "verlichting": "lamp",
+        "lampje": "lamp",
+        "ledlamp": "lamp",
+        "ledstrip": "lamp",
+        "spot": "lamp",
+        "plafondlamp": "lamp",
+        "avond": "avonds",
+        "s avonds": "avonds",
+        "savonds": "avonds",
+        "ochtend": "ochtends",
+        "s ochtends": "ochtends",
+        "sochtends": "ochtends",
+        "nacht": "nachts",
+        "s nachts": "nachts",
+        "snachts": "nachts",
+        "middag": "middags",
+        "aan": "aanzetten",
+        "uit": "uitzetten",
+        "aandoen": "aanzetten",
+        "uitdoen": "uitzetten",
+        "inschakelen": "aanzetten",
+        "uitschakelen": "uitzetten",
+        "activeren": "aanzetten",
+        "deactiveren": "uitzetten",
+        "woonkamer": "living",
+        "zitkamer": "living",
+        "slaapkamer": "bedroom",
+        "badkamer": "bathroom",
+        "keuken": "kitchen",
+        "hal": "hallway",
+        "gang": "hallway",
+        "verwarming": "heating",
+        "thermostaat": "heating",
+        "cv": "heating",
+        "koeling": "cooling",
+        "airco": "cooling",
+        "rolluik": "shutter",
+        "zonwering": "shutter",
+        "gordijn": "curtain",
+        "scherm": "screen",
+        "zonsondergang": "sunset",
+        "zonsopgang": "sunrise",
+        "zonsopkomst": "sunrise",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text
+
+
+def search_automations_dutch(query: str, automations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Zoek automations met uitgebreide Nederlandse ondersteuning.
+    Returns: lijst van automations gesorteerd op relevantie (hoogste eerst)
+    """
+    if not query or not query.strip():
+        return automations
+
+    normalized_query = normalize_dutch_text(query)
+    query_words = set(normalized_query.split())
+
+    scored_results: List[Dict[str, Any]] = []
+
+    for auto in automations:
+        score = 0
+        filename = auto.get("filename", "")
+        name = auto.get("name", "")
+
+        normalized_name = normalize_dutch_text(name)
+        normalized_filename = normalize_dutch_text(filename)
+
+        # Exact match = super hoge score
+        if normalized_query in normalized_name or normalized_query in normalized_filename:
+            score += 1000
+
+        name_words = set(normalized_name.split())
+        filename_words = set(normalized_filename.split())
+        all_words = name_words | filename_words
+
+        # Elk query woord dat matcht
+        matching_words = query_words & all_words
+        score += len(matching_words) * 100
+
+        # Bonus voor woorden aan het begin
+        if any(normalized_name.startswith(word) for word in query_words):
+            score += 50
+
+        # Partial matching (substring)
+        for qword in query_words:
+            if len(qword) >= 3:
+                for aword in all_words:
+                    if qword in aword or aword in qword:
+                        score += 25
+
+        if score > 0:
+            scored_results.append({"automation": auto, "score": score})
+
+    scored_results.sort(key=lambda x: x["score"], reverse=True)
+    return [item["automation"] for item in scored_results]
+
+
+# -----------------------------------------------------------------------------
+# NIEUWE SECTIE: Safety Checks
+# -----------------------------------------------------------------------------
+def check_infinite_loop(automation: Dict[str, Any]) -> Dict[str, Any] | None:
+    """
+    Detecteer als een automation zichzelf kan triggeren.
+    Returns: {"warning": str, "severity": "error"|"warning"} of None
+    """
+    trigger = automation.get("trigger") or {}
+    action = automation.get("action") or {}
+
+    trigger_type = trigger.get("type")
+    trigger_entity = trigger.get("value", "")
+    action_entity = action.get("value", "")
+
+    if trigger_type == "state" and trigger_entity and action_entity:
+        if trigger_entity == action_entity:
+            return {
+                "warning": "⚠️ Deze automation kan zichzelf oneindig triggeren! "
+                           f"Je triggert op '{trigger_entity}' en verandert diezelfde entity. "
+                           "Dat is een slecht idee.",
+                "severity": "error",
+            }
+
+    return None
+
+
+def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Detecteer conflicten met bestaande automations.
+    Returns: lijst van {"automation": str, "conflict": str, "severity": str}
+    """
+    conflicts: List[Dict[str, Any]] = []
+
+    trigger = automation.get("trigger") or {}
+    action = automation.get("action") or {}
+
+    trigger_type = trigger.get("type")
+    trigger_time = trigger.get("value", "") if trigger_type == "time" else None
+    action_type = action.get("type")
+    action_entity = action.get("value", "")
+
+    for existing in existing_automations:
+        try:
+            fp = safe_join(AUTOMATIONS_PATH, existing.get("filename", ""))
+            if not os.path.exists(fp):
+                continue
+
+            with open(fp, "r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f)
+
+            if not isinstance(yaml_data, list) or not yaml_data:
+                continue
+
+            existing_trigger = parse_trigger_from_yaml(
+                yaml_data[0].get("trigger", []),
+                yaml_data[0].get("condition", []),
+            )
+            existing_action = parse_action_from_yaml(yaml_data[0].get("action", []))
+
+            # Zelfde tijd, zelfde entity, tegengestelde actie
+            if (
+                trigger_type == "time"
+                and existing_trigger.get("type") == "time"
+                and trigger_time == existing_trigger.get("value")
+            ):
+                if action_entity == existing_action.get("value"):
+                    # Tegengestelde acties?
+                    if (
+                        (action_type == "turn_on" and existing_action.get("type") == "turn_off")
+                        or (action_type == "turn_off" and existing_action.get("type") == "turn_on")
+                    ):
+                        conflicts.append(
+                            {
+                                "automation": existing.get("name", "Onbekend"),
+                                "conflict": f"⚠️ '{existing.get('name')}' doet het tegenovergestelde "
+                                           f"om {trigger_time} met '{action_entity}'!",
+                                "severity": "warning",
+                            }
+                        )
+                    # Zelfde actie = duplicaat
+                    elif action_type == existing_action.get("type"):
+                        conflicts.append(
+                            {
+                                "automation": existing.get("name", "Onbekend"),
+                                "conflict": f"ℹ️ '{existing.get('name')}' doet precies hetzelfde "
+                                           f"om {trigger_time}. Dubbel werk?",
+                                "severity": "info",
+                            }
+                        )
+
+        except Exception as e:
+            print(f"[Conflict check] Error checking {existing.get('filename')}: {e}")
+            continue
+
+    return conflicts
+
+
+def check_dangerous_action(automation: Dict[str, Any]) -> Dict[str, Any] | None:
+    """
+    Detecteer gevaarlijke acties die bevestiging vereisen.
+    Returns: {"warning": str, "severity": "danger"|"warning"|"info", "require_confirmation": bool} of None
+    """
+    action = automation.get("action") or {}
+    action_type = action.get("type")
+    action_entity = (action.get("value") or "").lower()
+
+    dangerous_patterns: List[Dict[str, Any]] = []
+
+    # Alles uitzetten
+    if action_type == "turn_off":
+        if "all" in action_entity or "alles" in action_entity or ".*" in action_entity:
+            dangerous_patterns.append(
+                {
+                    "warning": "🚨 Je zet ALLES uit! Weet je het zeker?",
+                    "severity": "danger",
+                    "require_confirmation": True,
+                }
+            )
+
+        # Verwarming uit
+        if any(word in action_entity for word in ["heat", "verwarming", "cv", "therm"]):
+            dangerous_patterns.append(
+                {
+                    "warning": "🥶 Let op: verwarming uitzetten kan gevaarlijk zijn bij vriesweer!",
+                    "severity": "warning",
+                    "require_confirmation": True,
+                }
+            )
+
+    # Alle lampen uit 's nachts
+    trigger = automation.get("trigger") or {}
+    if action_type == "turn_off" and "light" in action_entity:
+        if trigger.get("type") == "time":
+            time_str = trigger.get("value", "")
+            try:
+                hour = int(time_str.split(":")[0])
+                if 0 <= hour <= 5:
+                    dangerous_patterns.append(
+                        {
+                            "warning": "💡 Alle lampen uit midden in de nacht? "
+                                      "Denk aan veiligheid (bijv. nachtlampje).",
+                            "severity": "info",
+                            "require_confirmation": False,
+                        }
+                    )
+            except Exception:
+                pass
+
+    return dangerous_patterns[0] if dangerous_patterns else None
+
+
+def get_current_temperature() -> float | None:
+    """Haal huidige temperatuur op (optioneel, voor slimme checks)."""
+    try:
+        if not SUPERVISOR_TOKEN:
+            return None
+
+        resp = requests.get("http://supervisor/core/api/states", headers=ha_headers(), timeout=5)
+        if resp.status_code != 200:
+            return None
+
+        states = resp.json()
+        for state in states:
+            entity_id = state.get("entity_id", "")
+            if "weather." in entity_id or "temperature" in entity_id.lower():
+                try:
+                    temp = float(state.get("state", 999))
+                    if -50 < temp < 50:
+                        return temp
+                except Exception:
+                    continue
+        return None
+    except Exception:
+        return None
+
+
+# -----------------------------------------------------------------------------
 # Home Assistant entities
 # -----------------------------------------------------------------------------
 def get_ha_entities() -> List[Dict[str, str]]:
@@ -126,7 +434,6 @@ def get_ha_entities() -> List[Dict[str, str]]:
             friendly = (s.get("attributes") or {}).get("friendly_name", entity_id)
             entities.append({"entity_id": entity_id, "domain": domain, "name": friendly})
 
-        # Nice UX: sort by friendly name
         entities.sort(key=lambda x: (x.get("name") or "").lower())
         return entities
     except Exception as e:
@@ -145,7 +452,7 @@ def parse_trigger_from_yaml(trigger_list: Any, condition_list: Any = None) -> Di
     platform = t.get("platform", "")
 
     # Check for weekday condition
-    selected_days = []
+    selected_days: List[str] = []
     if condition_list and isinstance(condition_list, list):
         for cond in condition_list:
             if isinstance(cond, dict) and cond.get("condition") == "time" and "weekday" in cond:
@@ -185,7 +492,6 @@ def parse_trigger_from_yaml(trigger_list: Any, condition_list: Any = None) -> Di
             model["days"] = selected_days
         return model
 
-    # Unknown platform fallback
     return {"type": platform, "value": ""}
 
 
@@ -244,7 +550,7 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
     # Trigger
     ttype = trigger.get("type")
     selected_days = trigger.get("days", [])
-    
+
     if ttype == "time":
         yaml_data[0]["trigger"].append({"platform": "time", "at": trigger.get("value", "12:00")})
 
@@ -267,7 +573,6 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
         yaml_data[0]["trigger"].append(trig)
 
     else:
-        # safe default
         yaml_data[0]["trigger"].append({"platform": "time", "at": "12:00"})
 
     # Add weekday condition if days are selected
@@ -276,8 +581,7 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
             "condition": "time",
             "weekday": selected_days
         })
-    
-    # Remove condition key if empty
+
     if not yaml_data[0]["condition"]:
         del yaml_data[0]["condition"]
 
@@ -347,7 +651,6 @@ def api_health():
 
 @app.route("/api/ingress", methods=["GET"])
 def api_ingress():
-    """Small helper for future UI improvements: returns ingress base path if available."""
     return jsonify({"ingress_path": ingress_path()})
 
 
@@ -406,6 +709,9 @@ def api_get_automation(filename: str):
         return jsonify({"error": str(e)}), 500
 
 
+# -----------------------------------------------------------------------------
+# WIJZIG BESTAANDE FUNCTIE: api_create_automation (met safety checks + confirmation)
+# -----------------------------------------------------------------------------
 @app.route("/api/automation", methods=["POST"])
 def api_create_automation():
     try:
@@ -422,16 +728,67 @@ def api_create_automation():
         if os.path.exists(fp):
             return jsonify({"error": f'Automation "{name}" bestaat al!'}), 409
 
+        # Safety checks
+        warnings: List[Dict[str, Any]] = []
+
+        loop_check = check_infinite_loop(automation)
+        if loop_check:
+            warnings.append(loop_check)
+
+        # Load existing automations
+        existing: List[Dict[str, Any]] = []
+        if os.path.exists(AUTOMATIONS_PATH):
+            for fn in os.listdir(AUTOMATIONS_PATH):
+                if fn.endswith(".yaml"):
+                    try:
+                        with open(safe_join(AUTOMATIONS_PATH, fn), "r", encoding="utf-8") as f:
+                            content = yaml.safe_load(f)
+                        if isinstance(content, list) and content:
+                            existing.append({"filename": fn, "name": content[0].get("alias", "Onbekend")})
+                    except Exception:
+                        continue
+
+        conflicts = check_conflicts(automation, existing)
+        for c in conflicts:
+            warnings.append({"warning": c["conflict"], "severity": c["severity"]})
+
+        danger_check = check_dangerous_action(automation)
+        if danger_check:
+            warnings.append(danger_check)
+
+        has_critical = any(w.get("severity") in ["error", "danger"] for w in warnings)
+        confirmed = bool(data.get("confirmed", False))
+
+        if has_critical and not confirmed:
+            return jsonify({
+                "warnings": warnings,
+                "require_confirmation": True,
+                "message": "Er zijn waarschuwingen gevonden. Wil je toch doorgaan?",
+            }), 400
+
         yaml_content = generate_automation_yaml(automation)
         with open(fp, "w", encoding="utf-8") as f:
             f.write(yaml_content)
 
         reload_automations()
-        return jsonify({"success": True, "message": f'Automation "{name}" opgeslagen!', "filename": filename})
+
+        response: Dict[str, Any] = {
+            "success": True,
+            "message": f'Automation "{name}" opgeslagen!',
+            "filename": filename,
+        }
+        if warnings:
+            response["warnings"] = warnings
+
+        return jsonify(response)
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
+# -----------------------------------------------------------------------------
+# WIJZIG BESTAANDE FUNCTIE: api_update_automation (met safety checks + confirmation)
+# -----------------------------------------------------------------------------
 @app.route("/api/automation/<filename>", methods=["PUT"])
 def api_update_automation(filename: str):
     try:
@@ -444,13 +801,60 @@ def api_update_automation(filename: str):
             return jsonify({"error": "Automation niet gevonden"}), 404
 
         automation = data["automation"] or {}
-        yaml_content = generate_automation_yaml(automation)
 
+        warnings: List[Dict[str, Any]] = []
+
+        loop_check = check_infinite_loop(automation)
+        if loop_check:
+            warnings.append(loop_check)
+
+        # Existing automations excluding current file
+        existing: List[Dict[str, Any]] = []
+        if os.path.exists(AUTOMATIONS_PATH):
+            for fn in os.listdir(AUTOMATIONS_PATH):
+                if fn.endswith(".yaml") and fn != filename:
+                    try:
+                        with open(safe_join(AUTOMATIONS_PATH, fn), "r", encoding="utf-8") as f:
+                            content = yaml.safe_load(f)
+                        if isinstance(content, list) and content:
+                            existing.append({"filename": fn, "name": content[0].get("alias", "Onbekend")})
+                    except Exception:
+                        continue
+
+        conflicts = check_conflicts(automation, existing)
+        for c in conflicts:
+            warnings.append({"warning": c["conflict"], "severity": c["severity"]})
+
+        danger_check = check_dangerous_action(automation)
+        if danger_check:
+            warnings.append(danger_check)
+
+        has_critical = any(w.get("severity") in ["error", "danger"] for w in warnings)
+        confirmed = bool(data.get("confirmed", False))
+
+        if has_critical and not confirmed:
+            return jsonify({
+                "warnings": warnings,
+                "require_confirmation": True,
+                "message": "Er zijn waarschuwingen gevonden. Wil je toch doorgaan?",
+            }), 400
+
+        yaml_content = generate_automation_yaml(automation)
         with open(fp, "w", encoding="utf-8") as f:
             f.write(yaml_content)
 
         reload_automations()
-        return jsonify({"success": True, "message": "Automation bijgewerkt!", "filename": os.path.basename(filename)})
+
+        response: Dict[str, Any] = {
+            "success": True,
+            "message": "Automation bijgewerkt!",
+            "filename": os.path.basename(filename),
+        }
+        if warnings:
+            response["warnings"] = warnings
+
+        return jsonify(response)
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -464,6 +868,44 @@ def api_delete_automation(filename: str):
         os.remove(fp)
         reload_automations()
         return jsonify({"success": True, "message": "Automation verwijderd"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# NIEUWE ROUTE: Search endpoint
+# -----------------------------------------------------------------------------
+@app.route("/api/automations/search", methods=["POST"])
+def api_search_automations():
+    """
+    Zoek automations met uitgebreide Nederlandse ondersteuning.
+    Body: {"query": "lamp avond"}
+    """
+    try:
+        data = request.json or {}
+        query = (data.get("query", "") or "").strip()
+
+        if not os.path.exists(AUTOMATIONS_PATH):
+            return jsonify([])
+
+        all_automations: List[Dict[str, Any]] = []
+        for fn in sorted(os.listdir(AUTOMATIONS_PATH)):
+            if not fn.endswith(".yaml"):
+                continue
+            fp = safe_join(AUTOMATIONS_PATH, fn)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    content = yaml.safe_load(f)
+                if isinstance(content, list) and content and isinstance(content[0], dict):
+                    all_automations.append({"filename": fn, "name": content[0].get("alias", "Onbekend")})
+                else:
+                    all_automations.append({"filename": fn, "name": "Onbekend (ongeldig formaat)"})
+            except Exception:
+                all_automations.append({"filename": fn, "name": "Onbekend (leesfout)"})
+
+        results = search_automations_dutch(query, all_automations)
+        return jsonify(results)
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -487,7 +929,6 @@ def api_test_action():
         steps: List[Dict[str, Any]] = []
 
         def step(msg: str, ok: bool = True, tech: Dict[str, Any] | None = None) -> None:
-            # UI expects: {message, ok, extra:{tech:{...}}}
             extra = {"tech": tech} if tech else {}
             steps.append({"message": msg, "ok": ok, "extra": extra})
 
@@ -609,28 +1050,15 @@ def api_test_action():
 # -----------------------------------------------------------------------------
 @app.errorhandler(404)
 def handle_404(_err):
-    """
-    If someone hits an unknown API URL, return JSON.
-    BUT: Home Assistant Ingress URLs may start with /api/hassio_ingress/..., which is NOT our API.
-    So we only treat /api/* as API if it's not the ingress prefix.
-    """
     path = (request.path or "").lstrip("/")
     if request.path.startswith("/api/") and not request.path.startswith("/api/hassio_ingress/"):
         return jsonify({"error": "Not found"}), 404
-    # Otherwise, fall back to index.html (single-page style)
     return send_from_directory("/", "index.html")
 
 
 @app.route("/", defaults={"path": ""}, methods=["GET"])
 @app.route("/<path:path>", methods=["GET"])
 def serve_ui(path: str):
-    """
-    Catch-all UI route:
-    - Works for normal access
-    - Works for Ingress paths (even if the ingress proxy doesn't strip prefixes)
-    - API routes are defined above; they will match before this route
-    """
-    # If it's exactly our index request or any "unknown" path, serve index.html
     return send_from_directory("/", "index.html")
 
 

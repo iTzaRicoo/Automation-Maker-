@@ -24,15 +24,11 @@ Dit is een bekende validatiebug in Home Assistant.
 
 ❌ FOUT
 
-yaml
-Code kopiëren
 dashboards:
   woonkamer:
   
 ✅ GOED
 
-yaml
-Code kopiëren
 dashboards:
   dash-woonkamer:
   
@@ -134,17 +130,15 @@ Status: Stable
 📦 Wat deze add-on NIET doet (bewust)
 
 ❌ Geen lovelace.reload (werkt niet in YAML)
-
 ❌ Geen resource auto-injectie (HA beperking)
-
 ❌ Geen storage dashboards (onstabiel)
 
 ❤️ Credits & Dank
 
-Home Assistant Core
-Mushroom Cards
-Community testers
-Iedereen die YAML boven UI verkiest 😉
+- Home Assistant Core
+- Mushroom Cards
+- Community testers
+- Iedereen die YAML boven UI verkiest 😉
 
 📄 Licentie
 MIT License

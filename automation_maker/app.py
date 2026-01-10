@@ -259,6 +259,7 @@ def check_infinite_loop(automation: Dict[str, Any]) -> Dict[str, Any] | None:
     return None
 
 
+# ✅ FIXED check_conflicts: ondersteunt weekdays overlap
 def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Detecteer conflicten met bestaande automations.
@@ -271,6 +272,7 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
 
     trigger_type = trigger.get("type")
     trigger_time = trigger.get("value", "") if trigger_type == "time" else None
+    trigger_days = set(trigger.get("days", []))  # FIX 1: Converteer naar set
     action_type = action.get("type")
     action_entity = action.get("value", "")
 
@@ -292,11 +294,23 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
             )
             existing_action = parse_action_from_yaml(yaml_data[0].get("action", []))
 
+            # FIX 2: Voeg days check toe
+            existing_days = set(existing_trigger.get("days", []))
+
+            # FIX 3: Check of er overlappende dagen zijn
+            has_overlapping_days = (
+                (not trigger_days and not existing_days) or  # Beide hebben geen dagen (=alle dagen)
+                (not trigger_days and existing_days) or      # Nieuwe heeft geen dagen (=alle dagen)
+                (trigger_days and not existing_days) or      # Bestaande heeft geen dagen (=alle dagen)
+                bool(trigger_days & existing_days)           # Er zijn overlappende dagen
+            )
+
             # Zelfde tijd, zelfde entity, tegengestelde actie
             if (
                 trigger_type == "time"
                 and existing_trigger.get("type") == "time"
                 and trigger_time == existing_trigger.get("value")
+                and has_overlapping_days  # FIX 4: Alleen conflict als er overlappende dagen zijn
             ):
                 if action_entity == existing_action.get("value"):
                     # Tegengestelde acties?

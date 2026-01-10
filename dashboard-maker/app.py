@@ -13,6 +13,7 @@ import yaml
 import zipfile
 import io
 import json
+import time
 
 # -------------------------
 # SSL Warning Fix
@@ -20,7 +21,7 @@ import json
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
@@ -444,11 +445,7 @@ def safe_get_states() -> List[Dict[str, Any]]:
     try:
         states = get_states()
         if not states:
-            return [{
-                "entity_id": "sun.sun",
-                "state": "above_horizon",
-                "attributes": {}
-            }]
+            return [{"entity_id": "sun.sun", "state": "above_horizon", "attributes": {}}]
         return states
     except Exception as e:
         print(f"Error getting states: {e}")
@@ -458,7 +455,6 @@ def safe_get_states() -> List[Dict[str, Any]]:
 # Mushroom install + resources
 # -------------------------
 def mushroom_installed() -> bool:
-    # Check multiple possible locations for the dist folder
     possible_paths = [
         os.path.join(MUSHROOM_PATH, "dist"),
         os.path.join(MUSHROOM_PATH, "build"),
@@ -631,11 +627,8 @@ def try_set_theme_auto() -> str:
     return "Theme geïnstalleerd (activeren niet gelukt)"
 
 # -------------------------
-# Register dashboard in configuration.yaml
+# Fix 1: Improved register_dashboard_in_lovelace (mode: yaml + unique key)
 # -------------------------
-def _dashboard_key_from_filename(filename: str) -> str:
-    return filename.replace(".yaml", "").replace("_", "-").lower()
-
 def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
@@ -657,15 +650,25 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
         lovelace = {}
     config["lovelace"] = lovelace
 
-    if "mode" not in lovelace or not isinstance(lovelace.get("mode"), str):
-        lovelace["mode"] = "storage"
+    # ✅ yaml mode (niet storage)
+    lovelace["mode"] = "yaml"
 
     dashboards = lovelace.get("dashboards")
     if not isinstance(dashboards, dict):
         dashboards = {}
     lovelace["dashboards"] = dashboards
 
-    dashboard_key = _dashboard_key_from_filename(filename)
+    dashboard_key = filename.replace(".yaml", "").replace("_", "-").replace(" ", "-").lower()
+    dashboard_key = re.sub(r"-?\d+$", "", dashboard_key)
+    if not dashboard_key:
+        dashboard_key = "dashboard"
+
+    original_key = dashboard_key
+    counter = 1
+    while dashboard_key in dashboards:
+        dashboard_key = f"{original_key}-{counter}"
+        counter += 1
+
     dashboards[dashboard_key] = {
         "mode": "yaml",
         "title": title,
@@ -677,15 +680,17 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     try:
         with open(config_yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        return f"Dashboard geregistreerd: {title}"
+
+        print(f"✅ Dashboard registered: {dashboard_key} -> {title}")
+        return f"Dashboard geregistreerd als '{dashboard_key}'"
     except Exception as e:
+        print(f"❌ Failed to write configuration.yaml: {e}")
         return f"Registratie gefaald: {str(e)}"
 
 # -------------------------
-# Dashboard Generator (Fix 3: replaced build_dashboard_yaml)
+# Dashboard generators
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
-    """Bouwt een volledig dashboard met ALLE beschikbare Mushroom kaarten"""
     states = safe_get_states()
     _areas = get_area_registry()
 
@@ -840,11 +845,7 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
         }]
     }
 
-# -------------------------
-# Fix 2: Comprehensive Demo Dashboard (ALL Mushroom card types)
-# -------------------------
 def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
-    """Bouwt een demo dashboard met ALLE Mushroom kaart types"""
     states = safe_get_states()
 
     lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
@@ -871,7 +872,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
         "subtitle": "Showcase van alle Mushroom kaarten • {{ now().strftime('%d %B %Y') }}"
     })
 
-    # Chips
     chips: List[Dict[str, Any]] = []
     if lights:
         chips.append({
@@ -902,7 +902,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
             "alignment": "center"
         })
 
-    # 1. Light Cards
     if lights:
         cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting", "subtitle": "Light cards met kleuren en helderheid"})
         for light in lights[:4]:
@@ -919,7 +918,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "hold_action": {"action": "more-info"}
             })
 
-    # 2. Climate Cards
     if climate:
         cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat", "subtitle": "Thermostaat bediening"})
         for c in climate[:3]:
@@ -931,7 +929,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:thermostat"
             })
 
-    # 3. Cover Cards
     if covers:
         cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Rolluiken & Gordijnen", "subtitle": "Cover cards"})
         for cover in covers[:3]:
@@ -943,7 +940,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "collapsible_controls": True
             })
 
-    # 4. Fan Cards
     if fans:
         cards.append({"type": "custom:mushroom-title-card", "title": "🌀 Ventilatoren", "subtitle": "Fan cards met snelheid"})
         for fan in fans[:3]:
@@ -956,7 +952,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:fan"
             })
 
-    # 5. Lock Cards
     if locks:
         cards.append({"type": "custom:mushroom-title-card", "title": "🔒 Sloten", "subtitle": "Lock cards"})
         for lock in locks[:3]:
@@ -966,7 +961,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:lock"
             })
 
-    # 6. Media Player Cards
     if media_players:
         cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media Spelers", "subtitle": "Media player cards"})
         for mp in media_players[:3]:
@@ -980,7 +974,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "collapsible_controls": True
             })
 
-    # 7. Person Cards
     if persons:
         cards.append({"type": "custom:mushroom-title-card", "title": "👤 Personen", "subtitle": "Person cards met aanwezigheid"})
         for person in persons[:4]:
@@ -991,7 +984,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "use_entity_picture": True
             })
 
-    # 8. Vacuum Cards
     if vacuums:
         cards.append({"type": "custom:mushroom-title-card", "title": "🤖 Stofzuigers", "subtitle": "Vacuum cards"})
         for vacuum in vacuums[:2]:
@@ -1002,7 +994,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:robot-vacuum"
             })
 
-    # 9. Alarm Cards
     if alarms:
         cards.append({"type": "custom:mushroom-title-card", "title": "🚨 Alarm", "subtitle": "Alarm control panel"})
         for alarm in alarms[:2]:
@@ -1012,7 +1003,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "states": ["armed_home", "armed_away", "armed_night", "disarmed"]
             })
 
-    # 10. Entity Cards (switches)
     if switches:
         cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars", "subtitle": "Entity cards voor schakelaars"})
         for sw in switches[:6]:
@@ -1023,9 +1013,9 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "tap_action": {"action": "toggle"}
             })
 
-    # 11. Sensor cards
     temp_sensors = [s for s in sensors if "temperature" in s.get("entity_id", "").lower()]
     humidity_sensors = [s for s in sensors if "humidity" in s.get("entity_id", "").lower()]
+
     if temp_sensors or humidity_sensors:
         cards.append({"type": "custom:mushroom-title-card", "title": "📊 Sensoren", "subtitle": "Entity cards voor metingen"})
         for temp in temp_sensors[:3]:
@@ -1045,7 +1035,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "secondary_info": "state"
             })
 
-    # 13. Template Card
     cards.append({"type": "custom:mushroom-title-card", "title": "✨ Template Cards", "subtitle": "Dynamische custom content"})
     cards.append({
         "type": "custom:mushroom-template-card",
@@ -1058,7 +1047,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
         "tap_action": {"action": "none"}
     })
 
-    # 14. Number Card
     if numbers:
         cards.append({"type": "custom:mushroom-title-card", "title": "🔢 Nummers", "subtitle": "Number input cards"})
         for num in numbers[:2]:
@@ -1069,7 +1057,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "display_mode": "slider"
             })
 
-    # 15. Select Card
     if selects:
         cards.append({"type": "custom:mushroom-title-card", "title": "📝 Selecties", "subtitle": "Select dropdown cards"})
         for sel in selects[:2]:
@@ -1079,7 +1066,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
                 "icon": "mdi:format-list-bulleted"
             })
 
-    # 16. Update Card
     if updates:
         cards.append({"type": "custom:mushroom-title-card", "title": "🔄 Updates", "subtitle": "Update cards"})
         for upd in updates[:2]:
@@ -1097,17 +1083,6 @@ def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
 # 🎨 {dashboard_title}
 
 Dit is een **demo dashboard** dat alle Mushroom kaart types laat zien!
-
-## ✨ Wat zie je hier?
-- 💡 Light cards (verlichting)
-- 🌡️ Climate cards (thermostaat)
-- 🪟 Cover cards (rolluiken)
-- 🔌 Entity cards (schakelaars)
-- 👤 Person cards (aanwezigheid)
-- 🎵 Media player cards
-- 🤖 Vacuum cards
-- 🚨 Alarm cards
-- En meer...
 
 ## 🚀 Volgende stap
 Maak je eigen dashboard via **Stap 3**!
@@ -1130,7 +1105,7 @@ Maak je eigen dashboard via **Stap 3**!
     }
 
 # -------------------------
-# HTML Wizard (Fix 4: better UI feedback in createDemo + createMine)
+# HTML Wizard (Fix 4 + Fix 5)
 # -------------------------
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="nl">
@@ -1157,6 +1132,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="flex gap-2 flex-wrap">
             <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
             <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🧾 Debug</button>
+            <button onclick="openDashboardDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔍 Dashboard Check</button>
           </div>
         </div>
       </div>
@@ -1408,7 +1384,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
-  // ✅ Fix 4: betere feedback demo
+  // ✅ Fix 4: UI feedback demo + reload instructie
   async function createDemo() {
     try {
       setStatus('Demo maken...', 'yellow');
@@ -1420,10 +1396,17 @@ HTML_PAGE = """<!DOCTYPE html>
         return;
       }
       setStatus('Demo gereed!', 'green');
-      alert('✅ Demo dashboard aangemaakt!\\n\\n' +
-            '📁 Bestand: ' + data.filename + '\\n' +
-            '📌 Check je sidebar voor: "WOW Demo Dashboard"\\n\\n' +
-            '💡 Herlaad eventueel je browser als het dashboard niet meteen zichtbaar is.');
+
+      var msg = '✅ Demo dashboard aangemaakt!\\n\\n';
+      msg += '📁 Bestand: ' + data.filename + '\\n';
+      msg += '📌 Titel: WOW Demo Dashboard\\n\\n';
+      msg += '🔄 BELANGRIJK:\\n';
+      msg += '1. Wacht 5 seconden\\n';
+      msg += '2. Druk op F5 (of refresh je browser)\\n';
+      msg += '3. Check je sidebar voor het nieuwe dashboard\\n\\n';
+      msg += '💡 Zie je het niet? Klik op "🔍 Dashboard Check" of open /api/debug/dashboards';
+
+      alert(msg);
       showStep4();
     } catch (e) {
       console.error(e);
@@ -1432,7 +1415,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
-  // ✅ Fix 4: betere feedback dashboards
+  // ✅ Fix 4: UI feedback dashboards + reload instructie
   async function createMine() {
     var base_title = document.getElementById('dashName').value.trim();
     if (!base_title) {
@@ -1461,11 +1444,19 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       setStatus('Dashboards gereed!', 'green');
-      alert('✅ Dashboards aangemaakt!\\n\\n' +
-            '📁 Basis: ' + data.simple_filename + '\\n' +
-            '📁 Compleet: ' + data.advanced_filename + '\\n\\n' +
-            '📌 Check je sidebar!\\n' +
-            '💡 Herlaad eventueel je browser als ze niet meteen zichtbaar zijn.');
+
+      var msg = '✅ Dashboards aangemaakt!\\n\\n';
+      msg += '📁 Basis: ' + data.simple_filename + '\\n';
+      msg += '📁 Compleet: ' + data.advanced_filename + '\\n\\n';
+      msg += '🔄 BELANGRIJK:\\n';
+      msg += '1. Wacht 5 seconden\\n';
+      msg += '2. Druk op F5 (of refresh je browser)\\n';
+      msg += '3. Check je sidebar voor de nieuwe dashboards\\n\\n';
+      msg += '💡 Zie je ze niet?\\n';
+      msg += '- Ga naar Instellingen > Dashboards\\n';
+      msg += '- Of klik op "🔍 Dashboard Check"';
+
+      alert(msg);
       showStep4();
     } catch (e) {
       console.error(e);
@@ -1550,6 +1541,35 @@ HTML_PAGE = """<!DOCTYPE html>
     var res = await fetch(API_BASE + '/api/debug/ha');
     var data = await res.json();
     alert(JSON.stringify(data, null, 2));
+  }
+
+  // ✅ Fix 5: Dashboard debug knop + endpoint
+  async function openDashboardDebug() {
+    try {
+      var res = await fetch(API_BASE + '/api/debug/dashboards');
+      var data = await res.json();
+
+      var msg = '🔍 Dashboard Debug Info\\n\\n';
+      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\\n';
+      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\\n';
+      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\\n\\n';
+
+      if (data.lovelace_config) {
+        msg += '⚙️ Lovelace config:\\n';
+        msg += JSON.stringify(data.lovelace_config, null, 2) + '\\n\\n';
+      }
+
+      if (data.dashboard_files && data.dashboard_files.length > 0) {
+        msg += '📋 Found dashboards:\\n';
+        data.dashboard_files.forEach(function(f) { msg += '  - ' + f + '\\n'; });
+      }
+
+      alert(msg);
+      console.log('Full debug data:', data);
+    } catch (e) {
+      console.error(e);
+      alert('❌ Debug check failed');
+    }
   }
 
   function resetWizard() {
@@ -1650,7 +1670,7 @@ def api_setup():
         return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
 
 # -------------------------
-# Fix 1: create_demo now uses comprehensive demo + returns url
+# Fix 2: Forceer Core Config Reload na registratie (create_demo)
 # -------------------------
 @app.route("/api/create_demo", methods=["POST"])
 def api_create_demo():
@@ -1659,7 +1679,6 @@ def api_create_demo():
         return jsonify({"success": False, "error": msg}), 400
 
     title = "WOW Demo Dashboard"
-
     dash = build_comprehensive_demo_dashboard(title)
     code = safe_yaml_dump(dash)
     fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
@@ -1667,21 +1686,26 @@ def api_create_demo():
 
     reg_msg = register_dashboard_in_lovelace(fn, title)
 
-    ha_call_service("homeassistant", "reload_core_config", {})
-    ha_call_service("lovelace", "reload", {})
-
-    dashboard_key = _dashboard_key_from_filename(fn)
+    # ✅ CRITICAL: Forceer reload in de juiste volgorde
+    try:
+        ha_call_service("homeassistant", "reload_core_config", {})
+        print("✅ Core config reloaded")
+        time.sleep(1)
+        ha_call_service("lovelace", "reload", {})
+        print("✅ Lovelace reloaded")
+    except Exception as e:
+        print(f"⚠️ Reload warning: {e}")
 
     return jsonify({
         "success": True,
         "filename": fn,
         "register": reg_msg,
-        # user-requested field (best effort)
-        "url": f"/dashboard-maker-{sanitize_filename(title)}",
-        # actual HA lovelace path for YAML dashboards (best effort)
-        "lovelace_url": f"/lovelace/{dashboard_key}",
+        "message": "Dashboard aangemaakt. Herlaad je browser als het niet meteen verschijnt."
     }), 200
 
+# -------------------------
+# Fix 2: Forceer Core Config Reload na registratie (create_dashboards)
+# -------------------------
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     ok, msg = conn.probe(force=True)
@@ -1693,7 +1717,6 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
-    # Simple dashboard
     simple_title = f"{base_title} - Basis"
     states = safe_get_states()
     simple_entities = [
@@ -1742,7 +1765,6 @@ def api_create_dashboards():
         }]
     }
 
-    # Advanced dashboard
     adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
@@ -1758,8 +1780,15 @@ def api_create_dashboards():
     reg1 = register_dashboard_in_lovelace(simple_fn, simple_title)
     reg2 = register_dashboard_in_lovelace(adv_fn, adv_title)
 
-    ha_call_service("homeassistant", "reload_core_config", {})
-    ha_call_service("lovelace", "reload", {})
+    # ✅ CRITICAL: Forceer reload
+    try:
+        ha_call_service("homeassistant", "reload_core_config", {})
+        print("✅ Core config reloaded")
+        time.sleep(1)
+        ha_call_service("lovelace", "reload", {})
+        print("✅ Lovelace reloaded")
+    except Exception as e:
+        print(f"⚠️ Reload warning: {e}")
 
     return jsonify({
         "success": True,
@@ -1768,10 +1797,7 @@ def api_create_dashboards():
         "simple_code": simple_code,
         "advanced_code": adv_code,
         "register": [reg1, reg2],
-        "lovelace_urls": {
-            "simple": f"/lovelace/{_dashboard_key_from_filename(simple_fn)}",
-            "advanced": f"/lovelace/{_dashboard_key_from_filename(adv_fn)}",
-        }
+        "message": "Dashboards aangemaakt. Herlaad je browser als ze niet meteen verschijnen."
     }), 200
 
 @app.route("/api/dashboards", methods=["GET"])
@@ -1840,6 +1866,45 @@ def api_debug_tokens():
             "has_token": bool(conn.active_token),
         }
     })
+
+# -------------------------
+# Fix 3: Debug endpoint dashboards
+# -------------------------
+@app.route("/api/debug/dashboards", methods=["GET"])
+def api_debug_dashboards():
+    """Debug endpoint om te zien waarom dashboards niet verschijnen"""
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    debug_info: Dict[str, Any] = {
+        "config_yaml_exists": os.path.exists(config_yaml_path),
+        "config_yaml_path": config_yaml_path,
+        "dashboards_path": DASHBOARDS_PATH,
+        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
+    }
+
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            debug_info["config_yaml_content"] = config
+            debug_info["lovelace_config"] = config.get("lovelace", {})
+        except Exception as e:
+            debug_info["config_yaml_error"] = str(e)
+
+    try:
+        files = list_yaml_files(DASHBOARDS_PATH)
+        debug_info["dashboard_files"] = files
+        debug_info["dashboard_files_count"] = len(files)
+    except Exception as e:
+        debug_info["dashboard_files_error"] = str(e)
+
+    try:
+        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
+        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
+    except Exception as e:
+        debug_info["permissions_error"] = str(e)
+
+    return jsonify(debug_info), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("INGRESS_PORT") or os.environ.get("PORT") or "5001")

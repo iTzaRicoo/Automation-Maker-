@@ -1,7 +1,6 @@
 # Dashboard Maker (Home Assistant Add-on)
 
 ![Home overzicht](docs/screenshots/home.png)
-![Woonkamer pagina](docs/screenshots/woonkamer.png)
 ![Dashboard Maker UI](docs/screenshots/ui.png)
 
 🧠 Hoe werkt het?

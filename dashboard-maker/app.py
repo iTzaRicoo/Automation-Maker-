@@ -20,7 +20,7 @@ import json
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 APP_NAME = "Dashboard Maker"
 
 app = Flask(__name__)
@@ -457,7 +457,6 @@ def safe_get_states() -> List[Dict[str, Any]]:
 # -------------------------
 # Mushroom install + resources
 # -------------------------
-# ✅ Fix 2: Update mushroom_installed check
 def mushroom_installed() -> bool:
     # Check multiple possible locations for the dist folder
     possible_paths = [
@@ -480,19 +479,16 @@ def mushroom_installed() -> bool:
 
     return False
 
-# ✅ Fix 1: Update download_and_extract_zip (temp extract + move)
 def download_and_extract_zip(url: str, target_dir: str):
     print(f"Downloading Mushroom from: {url}")
     r = requests.get(url, timeout=45, verify=False)
     r.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        # Extract to temp location first
         temp_extract = os.path.join(target_dir, "_temp_extract")
         os.makedirs(temp_extract, exist_ok=True)
         z.extractall(temp_extract)
 
-    # Find the extracted folder
     extracted_items = os.listdir(temp_extract)
     if not extracted_items:
         shutil.rmtree(temp_extract)
@@ -501,11 +497,9 @@ def download_and_extract_zip(url: str, target_dir: str):
     source_folder = os.path.join(temp_extract, extracted_items[0])
     final_path = os.path.join(target_dir, "lovelace-mushroom")
 
-    # Remove old install if exists
     if os.path.exists(final_path):
         shutil.rmtree(final_path)
 
-    # Move to final location
     shutil.move(source_folder, final_path)
     shutil.rmtree(temp_extract)
 
@@ -530,22 +524,17 @@ def get_lovelace_resources() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-# ✅ Fix 3: Fallback naar CDN - Update ensure_mushroom_resource
 def ensure_mushroom_resource() -> str:
-    # Try local install first
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
-    # Fallback to CDN
     cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
 
     resources = get_lovelace_resources()
 
-    # Check if already registered
     for res in resources:
         url = res.get("url", "")
         if local_url in url or "mushroom" in url:
             return "Mushroom resource staat goed"
 
-    # Try local first, then CDN
     for url_to_try in [local_url, cdn_url]:
         payload = {"type": "module", "url": url_to_try}
         try:
@@ -644,6 +633,9 @@ def try_set_theme_auto() -> str:
 # -------------------------
 # Register dashboard in configuration.yaml
 # -------------------------
+def _dashboard_key_from_filename(filename: str) -> str:
+    return filename.replace(".yaml", "").replace("_", "-").lower()
+
 def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
@@ -673,7 +665,7 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
         dashboards = {}
     lovelace["dashboards"] = dashboards
 
-    dashboard_key = filename.replace(".yaml", "").replace("_", "-").lower()
+    dashboard_key = _dashboard_key_from_filename(filename)
     dashboards[dashboard_key] = {
         "mode": "yaml",
         "title": title,
@@ -690,9 +682,10 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
         return f"Registratie gefaald: {str(e)}"
 
 # -------------------------
-# Dashboard Generator (real Mushroom cards)
+# Dashboard Generator (Fix 3: replaced build_dashboard_yaml)
 # -------------------------
 def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
+    """Bouwt een volledig dashboard met ALLE beschikbare Mushroom kaarten"""
     states = safe_get_states()
     _areas = get_area_registry()
 
@@ -700,29 +693,58 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")]
     sensors = [e for e in states if (e.get("entity_id", "") or "").startswith("sensor.")]
     climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")]
+    covers = [e for e in states if (e.get("entity_id", "") or "").startswith("cover.")]
+    fans = [e for e in states if (e.get("entity_id", "") or "").startswith("fan.")]
+    locks = [e for e in states if (e.get("entity_id", "") or "").startswith("lock.")]
+    media_players = [e for e in states if (e.get("entity_id", "") or "").startswith("media_player.")]
+    persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
+    vacuums = [e for e in states if (e.get("entity_id", "") or "").startswith("vacuum.")]
 
     cards: List[Dict[str, Any]] = []
 
     cards.append({
         "type": "custom:mushroom-title-card",
         "title": dashboard_title,
-        "subtitle": "{{ now().strftime('%d %B %Y') }}"
+        "subtitle": "{{ now().strftime('%d %B %Y • %H:%M') }}"
     })
+
+    chips: List[Dict[str, Any]] = []
+    if persons:
+        chips.append({"type": "entity", "entity": persons[0]["entity_id"], "use_entity_picture": True})
+    if lights:
+        chips.append({
+            "type": "template",
+            "entity": lights[0]["entity_id"],
+            "icon": "mdi:lightbulb",
+            "tap_action": {"action": "toggle"}
+        })
+    if chips:
+        cards.append({"type": "custom:mushroom-chips-card", "chips": chips, "alignment": "center"})
+
+    if persons:
+        cards.append({"type": "custom:mushroom-title-card", "title": "👤 Thuis"})
+        for person in persons[:4]:
+            cards.append({
+                "type": "custom:mushroom-person-card",
+                "entity": person["entity_id"],
+                "use_entity_picture": True
+            })
 
     if lights:
         cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting"})
-        for light in lights[:6]:
+        for light in lights[:8]:
             cards.append({
                 "type": "custom:mushroom-light-card",
                 "entity": light["entity_id"],
                 "use_light_color": True,
                 "show_brightness_control": True,
+                "show_color_control": True,
                 "collapsible_controls": True
             })
 
     if climate:
         cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat"})
-        for c in climate[:3]:
+        for c in climate:
             cards.append({
                 "type": "custom:mushroom-climate-card",
                 "entity": c["entity_id"],
@@ -730,9 +752,58 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
                 "collapsible_controls": True
             })
 
+    if covers:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Rolluiken"})
+        for cover in covers[:6]:
+            cards.append({
+                "type": "custom:mushroom-cover-card",
+                "entity": cover["entity_id"],
+                "show_buttons_control": True,
+                "show_position_control": True,
+                "collapsible_controls": True
+            })
+
+    if fans:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🌀 Ventilatoren"})
+        for fan in fans:
+            cards.append({
+                "type": "custom:mushroom-fan-card",
+                "entity": fan["entity_id"],
+                "show_percentage_control": True,
+                "collapsible_controls": True
+            })
+
+    if media_players:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media"})
+        for mp in media_players[:4]:
+            cards.append({
+                "type": "custom:mushroom-media-player-card",
+                "entity": mp["entity_id"],
+                "use_media_info": True,
+                "show_volume_level": True,
+                "collapsible_controls": True
+            })
+
+    if vacuums:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🤖 Stofzuigers"})
+        for vacuum in vacuums:
+            cards.append({
+                "type": "custom:mushroom-vacuum-card",
+                "entity": vacuum["entity_id"],
+                "commands": ["start_pause", "stop", "locate", "return_home"]
+            })
+
+    if locks:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔒 Sloten"})
+        for lock in locks:
+            cards.append({
+                "type": "custom:mushroom-lock-card",
+                "entity": lock["entity_id"]
+            })
+
     if switches:
         cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars"})
-        for sw in switches[:6]:
+        for sw in switches[:8]:
             cards.append({
                 "type": "custom:mushroom-entity-card",
                 "entity": sw["entity_id"],
@@ -742,14 +813,14 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     temp_sensors = [s for s in sensors if "temperature" in (s.get("entity_id", "").lower())]
     if temp_sensors:
         cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Temperaturen"})
-        for temp in temp_sensors[:4]:
+        for temp in temp_sensors[:6]:
             cards.append({
                 "type": "custom:mushroom-entity-card",
                 "entity": temp["entity_id"],
                 "icon": "mdi:thermometer"
             })
 
-    if len(cards) == 1 and not (lights or switches or climate or temp_sensors):
+    if len(cards) == 1:
         cards.append({
             "type": "markdown",
             "content": f"# {dashboard_title}\n\n✅ Dashboard aangemaakt!\n\nVoeg handmatig kaarten toe via de UI editor."
@@ -770,7 +841,296 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
     }
 
 # -------------------------
-# HTML Wizard (kept ingress-safe API_BASE)
+# Fix 2: Comprehensive Demo Dashboard (ALL Mushroom card types)
+# -------------------------
+def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
+    """Bouwt een demo dashboard met ALLE Mushroom kaart types"""
+    states = safe_get_states()
+
+    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
+    switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")]
+    sensors = [e for e in states if (e.get("entity_id", "") or "").startswith("sensor.")]
+    climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")]
+    covers = [e for e in states if (e.get("entity_id", "") or "").startswith("cover.")]
+    fans = [e for e in states if (e.get("entity_id", "") or "").startswith("fan.")]
+    locks = [e for e in states if (e.get("entity_id", "") or "").startswith("lock.")]
+    media_players = [e for e in states if (e.get("entity_id", "") or "").startswith("media_player.")]
+    persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
+    vacuums = [e for e in states if (e.get("entity_id", "") or "").startswith("vacuum.")]
+    alarms = [e for e in states if (e.get("entity_id", "") or "").startswith("alarm_control_panel.")]
+    numbers = [e for e in states if (e.get("entity_id", "") or "").startswith("number.")]
+    selects = [e for e in states if (e.get("entity_id", "") or "").startswith("select.")]
+    updates = [e for e in states if (e.get("entity_id", "") or "").startswith("update.")]
+    weather_entities = [e for e in states if (e.get("entity_id", "") or "").startswith("weather.")]
+
+    cards: List[Dict[str, Any]] = []
+
+    cards.append({
+        "type": "custom:mushroom-title-card",
+        "title": "🎨 " + dashboard_title,
+        "subtitle": "Showcase van alle Mushroom kaarten • {{ now().strftime('%d %B %Y') }}"
+    })
+
+    # Chips
+    chips: List[Dict[str, Any]] = []
+    if lights:
+        chips.append({
+            "type": "template",
+            "entity": lights[0]["entity_id"],
+            "icon": "mdi:lightbulb",
+            "content": "{{ states(entity) }}",
+            "tap_action": {"action": "toggle"}
+        })
+    if persons:
+        chips.append({
+            "type": "entity",
+            "entity": persons[0]["entity_id"],
+            "icon": "mdi:account",
+            "use_entity_picture": True
+        })
+    if weather_entities:
+        chips.append({
+            "type": "weather",
+            "entity": weather_entities[0]["entity_id"],
+            "show_temperature": True,
+            "show_conditions": True
+        })
+    if chips:
+        cards.append({
+            "type": "custom:mushroom-chips-card",
+            "chips": chips,
+            "alignment": "center"
+        })
+
+    # 1. Light Cards
+    if lights:
+        cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting", "subtitle": "Light cards met kleuren en helderheid"})
+        for light in lights[:4]:
+            cards.append({
+                "type": "custom:mushroom-light-card",
+                "entity": light["entity_id"],
+                "use_light_color": True,
+                "show_brightness_control": True,
+                "show_color_control": True,
+                "show_color_temp_control": True,
+                "collapsible_controls": True,
+                "icon": "mdi:lightbulb",
+                "tap_action": {"action": "toggle"},
+                "hold_action": {"action": "more-info"}
+            })
+
+    # 2. Climate Cards
+    if climate:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat", "subtitle": "Thermostaat bediening"})
+        for c in climate[:3]:
+            cards.append({
+                "type": "custom:mushroom-climate-card",
+                "entity": c["entity_id"],
+                "show_temperature_control": True,
+                "collapsible_controls": True,
+                "icon": "mdi:thermostat"
+            })
+
+    # 3. Cover Cards
+    if covers:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Rolluiken & Gordijnen", "subtitle": "Cover cards"})
+        for cover in covers[:3]:
+            cards.append({
+                "type": "custom:mushroom-cover-card",
+                "entity": cover["entity_id"],
+                "show_buttons_control": True,
+                "show_position_control": True,
+                "collapsible_controls": True
+            })
+
+    # 4. Fan Cards
+    if fans:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🌀 Ventilatoren", "subtitle": "Fan cards met snelheid"})
+        for fan in fans[:3]:
+            cards.append({
+                "type": "custom:mushroom-fan-card",
+                "entity": fan["entity_id"],
+                "show_percentage_control": True,
+                "show_oscillate_control": True,
+                "collapsible_controls": True,
+                "icon": "mdi:fan"
+            })
+
+    # 5. Lock Cards
+    if locks:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔒 Sloten", "subtitle": "Lock cards"})
+        for lock in locks[:3]:
+            cards.append({
+                "type": "custom:mushroom-lock-card",
+                "entity": lock["entity_id"],
+                "icon": "mdi:lock"
+            })
+
+    # 6. Media Player Cards
+    if media_players:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media Spelers", "subtitle": "Media player cards"})
+        for mp in media_players[:3]:
+            cards.append({
+                "type": "custom:mushroom-media-player-card",
+                "entity": mp["entity_id"],
+                "use_media_info": True,
+                "show_volume_level": True,
+                "media_controls": ["on_off", "play_pause_stop", "previous", "next"],
+                "volume_controls": ["volume_buttons", "volume_set"],
+                "collapsible_controls": True
+            })
+
+    # 7. Person Cards
+    if persons:
+        cards.append({"type": "custom:mushroom-title-card", "title": "👤 Personen", "subtitle": "Person cards met aanwezigheid"})
+        for person in persons[:4]:
+            cards.append({
+                "type": "custom:mushroom-person-card",
+                "entity": person["entity_id"],
+                "icon": "mdi:account",
+                "use_entity_picture": True
+            })
+
+    # 8. Vacuum Cards
+    if vacuums:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🤖 Stofzuigers", "subtitle": "Vacuum cards"})
+        for vacuum in vacuums[:2]:
+            cards.append({
+                "type": "custom:mushroom-vacuum-card",
+                "entity": vacuum["entity_id"],
+                "commands": ["start_pause", "stop", "locate", "clean_spot", "return_home"],
+                "icon": "mdi:robot-vacuum"
+            })
+
+    # 9. Alarm Cards
+    if alarms:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🚨 Alarm", "subtitle": "Alarm control panel"})
+        for alarm in alarms[:2]:
+            cards.append({
+                "type": "custom:mushroom-alarm-control-panel-card",
+                "entity": alarm["entity_id"],
+                "states": ["armed_home", "armed_away", "armed_night", "disarmed"]
+            })
+
+    # 10. Entity Cards (switches)
+    if switches:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars", "subtitle": "Entity cards voor schakelaars"})
+        for sw in switches[:6]:
+            cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": sw["entity_id"],
+                "icon": "mdi:power-plug",
+                "tap_action": {"action": "toggle"}
+            })
+
+    # 11. Sensor cards
+    temp_sensors = [s for s in sensors if "temperature" in s.get("entity_id", "").lower()]
+    humidity_sensors = [s for s in sensors if "humidity" in s.get("entity_id", "").lower()]
+    if temp_sensors or humidity_sensors:
+        cards.append({"type": "custom:mushroom-title-card", "title": "📊 Sensoren", "subtitle": "Entity cards voor metingen"})
+        for temp in temp_sensors[:3]:
+            cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": temp["entity_id"],
+                "icon": "mdi:thermometer",
+                "primary_info": "name",
+                "secondary_info": "state"
+            })
+        for hum in humidity_sensors[:3]:
+            cards.append({
+                "type": "custom:mushroom-entity-card",
+                "entity": hum["entity_id"],
+                "icon": "mdi:water-percent",
+                "primary_info": "name",
+                "secondary_info": "state"
+            })
+
+    # 13. Template Card
+    cards.append({"type": "custom:mushroom-title-card", "title": "✨ Template Cards", "subtitle": "Dynamische custom content"})
+    cards.append({
+        "type": "custom:mushroom-template-card",
+        "primary": "Welkom thuis!",
+        "secondary": "{{ now().strftime('%H:%M') }}",
+        "icon": "mdi:home-assistant",
+        "icon_color": "blue",
+        "badge_icon": "mdi:check",
+        "badge_color": "green",
+        "tap_action": {"action": "none"}
+    })
+
+    # 14. Number Card
+    if numbers:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔢 Nummers", "subtitle": "Number input cards"})
+        for num in numbers[:2]:
+            cards.append({
+                "type": "custom:mushroom-number-card",
+                "entity": num["entity_id"],
+                "icon": "mdi:numeric",
+                "display_mode": "slider"
+            })
+
+    # 15. Select Card
+    if selects:
+        cards.append({"type": "custom:mushroom-title-card", "title": "📝 Selecties", "subtitle": "Select dropdown cards"})
+        for sel in selects[:2]:
+            cards.append({
+                "type": "custom:mushroom-select-card",
+                "entity": sel["entity_id"],
+                "icon": "mdi:format-list-bulleted"
+            })
+
+    # 16. Update Card
+    if updates:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔄 Updates", "subtitle": "Update cards"})
+        for upd in updates[:2]:
+            cards.append({
+                "type": "custom:mushroom-update-card",
+                "entity": upd["entity_id"],
+                "icon": "mdi:package-up",
+                "show_buttons_control": True
+            })
+
+    if len(cards) <= 2:
+        cards.append({
+            "type": "markdown",
+            "content": f"""
+# 🎨 {dashboard_title}
+
+Dit is een **demo dashboard** dat alle Mushroom kaart types laat zien!
+
+## ✨ Wat zie je hier?
+- 💡 Light cards (verlichting)
+- 🌡️ Climate cards (thermostaat)
+- 🪟 Cover cards (rolluiken)
+- 🔌 Entity cards (schakelaars)
+- 👤 Person cards (aanwezigheid)
+- 🎵 Media player cards
+- 🤖 Vacuum cards
+- 🚨 Alarm cards
+- En meer...
+
+## 🚀 Volgende stap
+Maak je eigen dashboard via **Stap 3**!
+            """.strip()
+        })
+
+    return {
+        "title": dashboard_title,
+        "views": [{
+            "title": "Demo",
+            "path": "demo",
+            "icon": "mdi:view-dashboard-variant",
+            "type": "sections",
+            "sections": [{
+                "type": "grid",
+                "cards": cards,
+                "column_span": 1
+            }]
+        }]
+    }
+
+# -------------------------
+# HTML Wizard (Fix 4: better UI feedback in createDemo + createMine)
 # -------------------------
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="nl">
@@ -1048,22 +1408,31 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
+  // ✅ Fix 4: betere feedback demo
   async function createDemo() {
     try {
+      setStatus('Demo maken...', 'yellow');
       var res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
       var data = await res.json();
       if (!res.ok || !data.success) {
         alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
+        setStatus('Demo mislukt', 'red');
         return;
       }
-      alert('✅ Demo gemaakt: ' + data.filename);
+      setStatus('Demo gereed!', 'green');
+      alert('✅ Demo dashboard aangemaakt!\\n\\n' +
+            '📁 Bestand: ' + data.filename + '\\n' +
+            '📌 Check je sidebar voor: "WOW Demo Dashboard"\\n\\n' +
+            '💡 Herlaad eventueel je browser als het dashboard niet meteen zichtbaar is.');
       showStep4();
     } catch (e) {
       console.error(e);
+      setStatus('Demo mislukt', 'red');
       alert('❌ Demo mislukt.');
     }
   }
 
+  // ✅ Fix 4: betere feedback dashboards
   async function createMine() {
     var base_title = document.getElementById('dashName').value.trim();
     if (!base_title) {
@@ -1072,6 +1441,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     try {
+      setStatus('Dashboards maken...', 'yellow');
       var res = await fetch(API_BASE + '/api/create_dashboards', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
@@ -1080,6 +1450,7 @@ HTML_PAGE = """<!DOCTYPE html>
       var data = await res.json();
       if (!res.ok || !data.success) {
         alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
+        setStatus('Maken mislukt', 'red');
         return;
       }
 
@@ -1089,10 +1460,16 @@ HTML_PAGE = """<!DOCTYPE html>
           (data.simple_code || '') + '\\n---\\n' + (data.advanced_code || '');
       }
 
-      alert('✅ Klaar!\\n- ' + data.simple_filename + '\\n- ' + data.advanced_filename);
+      setStatus('Dashboards gereed!', 'green');
+      alert('✅ Dashboards aangemaakt!\\n\\n' +
+            '📁 Basis: ' + data.simple_filename + '\\n' +
+            '📁 Compleet: ' + data.advanced_filename + '\\n\\n' +
+            '📌 Check je sidebar!\\n' +
+            '💡 Herlaad eventueel je browser als ze niet meteen zichtbaar zijn.');
       showStep4();
     } catch (e) {
       console.error(e);
+      setStatus('Maken mislukt', 'red');
       alert('❌ Maken mislukt.');
     }
   }
@@ -1272,6 +1649,9 @@ def api_setup():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
 
+# -------------------------
+# Fix 1: create_demo now uses comprehensive demo + returns url
+# -------------------------
 @app.route("/api/create_demo", methods=["POST"])
 def api_create_demo():
     ok, msg = conn.probe(force=True)
@@ -1279,16 +1659,28 @@ def api_create_demo():
         return jsonify({"success": False, "error": msg}), 400
 
     title = "WOW Demo Dashboard"
-    dash = build_dashboard_yaml(title)
+
+    dash = build_comprehensive_demo_dashboard(title)
     code = safe_yaml_dump(dash)
     fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
     write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
 
     reg_msg = register_dashboard_in_lovelace(fn, title)
+
     ha_call_service("homeassistant", "reload_core_config", {})
     ha_call_service("lovelace", "reload", {})
 
-    return jsonify({"success": True, "filename": fn, "register": reg_msg}), 200
+    dashboard_key = _dashboard_key_from_filename(fn)
+
+    return jsonify({
+        "success": True,
+        "filename": fn,
+        "register": reg_msg,
+        # user-requested field (best effort)
+        "url": f"/dashboard-maker-{sanitize_filename(title)}",
+        # actual HA lovelace path for YAML dashboards (best effort)
+        "lovelace_url": f"/lovelace/{dashboard_key}",
+    }), 200
 
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
@@ -1301,6 +1693,7 @@ def api_create_dashboards():
     if not base_title:
         return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
 
+    # Simple dashboard
     simple_title = f"{base_title} - Basis"
     states = safe_get_states()
     simple_entities = [
@@ -1349,6 +1742,7 @@ def api_create_dashboards():
         }]
     }
 
+    # Advanced dashboard
     adv_title = f"{base_title} - Compleet"
     adv_dash = build_dashboard_yaml(adv_title)
 
@@ -1374,6 +1768,10 @@ def api_create_dashboards():
         "simple_code": simple_code,
         "advanced_code": adv_code,
         "register": [reg1, reg2],
+        "lovelace_urls": {
+            "simple": f"/lovelace/{_dashboard_key_from_filename(simple_fn)}",
+            "advanced": f"/lovelace/{_dashboard_key_from_filename(adv_fn)}",
+        }
     }), 200
 
 @app.route("/api/dashboards", methods=["GET"])
@@ -1411,8 +1809,8 @@ def api_reload_lovelace():
         return jsonify({"ok": False, "error": msg}), 400
 
     candidates = [
-        ("lovelace", "reload", {}),
         ("homeassistant", "reload_core_config", {}),
+        ("lovelace", "reload", {}),
     ]
 
     last = None

@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 from flask import Flask, request, jsonify, Response
 import os
 import re
 import shutil
-import time
 from pathlib import Path
 import requests
 from datetime import datetime
@@ -13,246 +11,153 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 import zipfile
 import io
-import json
-
-# SSL warning fix
+import json  # ✅ Ensure json is imported
+import time
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-APP_VERSION = "1.0.9"
-APP_NAME = "Dashboard Maker"
+# -----------------------------------------------------------------------------
+# App metadata
+# -----------------------------------------------------------------------------
+APP_NAME = os.environ.get("APP_NAME", "Dashboard Maker")
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 
 app = Flask(__name__)
 
-# ✅ INGRESS FIX: Handle Home Assistant ingress proxy (alleen in productie / Supervisor)
-from werkzeug.middleware.proxy_fix import ProxyFix
-if os.environ.get("SUPERVISOR_TOKEN"):
-    app.wsgi_app = ProxyFix(
-        app.wsgi_app,
-        x_for=1,
-        x_proto=1,
-        x_host=1,
-        x_prefix=1
-    )
+# -----------------------------------------------------------------------------
+# Paths / constants
+# -----------------------------------------------------------------------------
+# In HA add-on context: /config is the HA config directory.
+CONFIGURED_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
+HA_CONFIG_PATH = os.path.abspath(CONFIGURED_CONFIG_PATH)
 
-# -------------------------
-# Paths
-# -------------------------
-HA_CONFIG_PATH = os.environ.get("HA_CONFIG_PATH", "/config")
+DASHBOARDS_PATH = os.path.join(HA_CONFIG_PATH, "dashboards")
+WWW_PATH = os.path.join(HA_CONFIG_PATH, "www")
+COMMUNITY_PATH = os.path.join(WWW_PATH, "community")
+MUSHROOM_PATH = os.path.join(COMMUNITY_PATH, "lovelace-mushroom")
 
-# Support both env var names (user had DASHBOARD_PATH in run.sh)
-DASHBOARDS_PATH = (
-    os.environ.get("DASHBOARDS_PATH")
-    or os.environ.get("DASHBOARD_PATH")
-    or os.path.join(HA_CONFIG_PATH, "dashboards")
-)
-
-ADDON_OPTIONS_PATH = os.environ.get("ADDON_OPTIONS_PATH", "/data/options.json")
-
-# --- Mushroom install ---
-MUSHROOM_VERSION = "5.0.9"
-MUSHROOM_GITHUB_ZIP = f"https://github.com/piitaya/lovelace-mushroom/archive/refs/tags/v{MUSHROOM_VERSION}.zip"
-WWW_COMMUNITY = os.path.join(HA_CONFIG_PATH, "www", "community")
-MUSHROOM_PATH = os.path.join(WWW_COMMUNITY, "lovelace-mushroom")
-
-# --- Themes ---
 THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
-DASHBOARD_THEME_FILE = os.path.join(THEMES_PATH, "dashboard_maker.yaml")
-THEME_NAME = "Dashboard Maker"
+DASHBOARD_THEME_DIR = os.path.join(THEMES_PATH, "dashboard_maker")
+DASHBOARD_THEME_FILE = os.path.join(DASHBOARD_THEME_DIR, "dashboard_maker.yaml")
 
-# --- HA URLs (lokaal eerst testen) ---
+ADDON_OPTIONS_PATH = "/data/options.json"  # HA add-on options
+SUPERVISOR_TOKEN_ENV = "SUPERVISOR_TOKEN"
+HOMEASSISTANT_TOKEN_ENV = "HOMEASSISTANT_TOKEN"
+
+# Prefer supervisor when available; fall back to local HA.
 HA_URLS = [
-    "http://127.0.0.1:8123",
-    "http://localhost:8123",
-    "http://homeassistant:8123",
     "http://supervisor/core",
+    "http://homeassistant:8123",
+    "http://127.0.0.1:8123",
 ]
 
-Path(DASHBOARDS_PATH).mkdir(parents=True, exist_ok=True)
-Path(THEMES_PATH).mkdir(parents=True, exist_ok=True)
-Path(WWW_COMMUNITY).mkdir(parents=True, exist_ok=True)
+# Latest releases ZIP (Mushroom) - can be overridden in options.json
+DEFAULT_MUSHROOM_ZIP = "https://github.com/piitaya/lovelace-mushroom/releases/latest/download/lovelace-mushroom.zip"
 
-# -------------------------
+
+# -----------------------------------------------------------------------------
 # Utils
-# -------------------------
-def _read_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return (f.read() or "").strip()
-    except Exception:
-        return ""
+# -----------------------------------------------------------------------------
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-def _read_options_json() -> Dict[str, Any]:
-    """Lees add-on opties met uitgebreide foutafhandeling"""
-    try:
-        if os.path.exists(ADDON_OPTIONS_PATH):
-            print(f"📖 Reading options from: {ADDON_OPTIONS_PATH}")
-            with open(ADDON_OPTIONS_PATH, "r", encoding="utf-8") as f:
-                content = f.read()
-                print(f"📄 Options.json content: {content[:200]}")
-                data = json.loads(content) or {}
-                print(f"✅ Parsed options: {list(data.keys())}")
-                return data
-        else:
-            print(f"⚠️ Options file not found: {ADDON_OPTIONS_PATH}")
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON parse error in options.json: {e}")
-    except Exception as e:
-        print(f"❌ Could not read options.json: {e}")
-    return {}
 
 def sanitize_filename(name: str) -> str:
-    name = (name or "").strip().lower()
-    name = re.sub(r"[^\w\s-]", "", name)
-    name = re.sub(r"[-\s]+", "_", name)
-    if not name:
-        name = "unnamed"
-    return name[:80]
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s, flags=re.UNICODE)
+    s = re.sub(r"[\s_-]+", "_", s)
+    s = re.sub(r"^_+|_+$", "", s)
+    return s or "dashboard"
 
-def safe_yaml_dump(obj: Any) -> str:
-    class Dumper(yaml.SafeDumper):
-        pass
 
-    def str_presenter(dumper, data):
-        if isinstance(data, str) and "\n" in data:
-            return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+def next_available_filename(folder: str, filename: str) -> str:
+    ensure_dir(folder)
+    base = Path(filename).stem
+    ext = Path(filename).suffix or ".yaml"
+    candidate = f"{base}{ext}"
+    i = 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{base}_{i}{ext}"
+        i += 1
+    return candidate
 
-    Dumper.add_representer(str, str_presenter)
-    return yaml.dump(obj, Dumper=Dumper, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-def read_text_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-def write_text_file(path: str, content: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def write_text_file(path: str, content: str) -> None:
+    ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
-def is_safe_filename(filename: str) -> bool:
-    if not filename or not filename.endswith(".yaml"):
-        return False
-    if ".." in filename or "/" in filename or "\\" in filename:
-        return False
-    return bool(re.match(r"^[a-zA-Z0-9._-]+\.yaml$", filename))
 
-def list_yaml_files(dir_path: str) -> List[str]:
-    if not os.path.exists(dir_path):
+def list_yaml_files(folder: str) -> List[str]:
+    if not os.path.exists(folder):
         return []
-    out = []
-    for fn in os.listdir(dir_path):
-        if fn.endswith(".yaml") and is_safe_filename(fn):
-            out.append(fn)
-    return sorted(out)
+    files = []
+    for fn in os.listdir(folder):
+        if fn.lower().endswith((".yaml", ".yml")):
+            files.append(fn)
+    return sorted(files)
 
-def next_available_filename(base_dir: str, desired: str) -> str:
-    if not desired.endswith(".yaml"):
-        desired += ".yaml"
-    if not os.path.exists(os.path.join(base_dir, desired)):
-        return desired
-    stem = desired[:-5]
-    for i in range(2, 999):
-        cand = f"{stem}_{i}.yaml"
-        if not os.path.exists(os.path.join(base_dir, cand)):
-            return cand
-    return f"{stem}_{int(datetime.now().timestamp())}.yaml"
 
-# -------------------------
-# Token discovery
-# -------------------------
-def discover_tokens() -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
-    """
-    Returns (user_token, supervisor_token, debug_info)
-    """
-    debug_info: Dict[str, Any] = {
-        "addon_options_exists": os.path.exists(ADDON_OPTIONS_PATH),
-        "env_homeassistant_token": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
-        "env_supervisor_token": bool(os.environ.get("SUPERVISOR_TOKEN")),
-        "supervisor_token_files_checked": [],
-    }
+def safe_yaml_dump(data: Any) -> str:
+    return yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-    opts = _read_options_json()
-    debug_info["options_json_keys"] = sorted(list(opts.keys()))
-    debug_info["options_json_content"] = str(opts)[:200]
 
-    # ✅ Eerst omgevingsvariabelen proberen
-    user_tok = (os.environ.get("HOMEASSISTANT_TOKEN", "") or "").strip()
-    if not user_tok:
-        user_tok = (opts.get("access_token", "") or "").strip()
-    if not user_tok:
-        user_tok = (opts.get("ha_token", "") or "").strip()
+def _read_options_json() -> Dict[str, Any]:
+    # Add-on options, if present.
+    if not os.path.exists(ADDON_OPTIONS_PATH):
+        return {}
+    try:
+        with open(ADDON_OPTIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as e:
+        print(f"options.json read error: {e}")
+        return {}
 
-    debug_info["user_token_found"] = bool(user_tok)
-    if user_tok:
-        debug_info["user_token_length"] = len(user_tok)
-        debug_info["user_token_prefix"] = (user_tok[:20] + "...") if len(user_tok) > 20 else user_tok
 
-    sup_tok = (os.environ.get("SUPERVISOR_TOKEN", "") or "").strip()
-    if not sup_tok:
-        sup_tok = (opts.get("supervisor_token", "") or "").strip()
-
-    if not sup_tok:
-        for p in [
-            "/var/run/supervisor_token",
-            "/run/supervisor_token",
-            "/data/supervisor_token",
-            "/supervisor_token",
-        ]:
-            debug_info["supervisor_token_files_checked"].append(p)
-            sup_tok = _read_file(p)
-            if sup_tok:
-                debug_info["supervisor_token_file_found"] = p
-                break
-
-    debug_info["supervisor_token_found"] = bool(sup_tok)
-    return (user_tok or None, sup_tok or None, debug_info)
-
-USER_TOKEN, SUPERVISOR_TOKEN, TOKEN_DEBUG = discover_tokens()
-
-print(f"\n{'='*60}")
-print(f"{APP_NAME} {APP_VERSION}")
-print(f"{'='*60}")
-print(f"Config path: {HA_CONFIG_PATH}")
-print(f"Dashboards path: {DASHBOARDS_PATH}")
-print(f"Options.json: {ADDON_OPTIONS_PATH}")
-print(f"\nToken Status:")
-print(f"  - User token (LLAT): {'✓ Found' if USER_TOKEN else '✗ NOT FOUND'}")
-print(f"  - Supervisor token: {'✓ Found' if SUPERVISOR_TOKEN else '✗ NOT FOUND'}")
-print(f"\nWill try these HA URLs in order:")
-for url in HA_URLS:
-    print(f"  - {url}")
-print(f"{'='*60}\n")
-
-# -------------------------
-# HA Connection
-# -------------------------
+# -----------------------------------------------------------------------------
+# Home Assistant Connection
+# -----------------------------------------------------------------------------
 class HAConnection:
-    def __init__(self):
+    def __init__(self) -> None:
+        self.user_token: Optional[str] = None
+        self.supervisor_token: Optional[str] = None
+
         self.active_base_url: Optional[str] = None
         self.active_token: Optional[str] = None
         self.active_mode: str = "unknown"
-        self.last_probe: Optional[str] = None
-        self.probe_attempts: List[Dict[str, Any]] = []
 
-        self.user_token: Optional[str] = None
-        self.supervisor_token: Optional[str] = None
+        self.last_probe: str = ""
+        self.probe_attempts: List[Dict[str, Any]] = []
         self.token_debug: Dict[str, Any] = {}
 
         self.refresh_tokens()
 
     def refresh_tokens(self) -> None:
-        u, s, dbg = discover_tokens()
-        self.user_token = u
-        self.supervisor_token = s
-        self.token_debug = dbg
+        opts = _read_options_json()
+        access_token = (opts.get("access_token") or "").strip()
+        self.user_token = access_token or os.environ.get(HOMEASSISTANT_TOKEN_ENV)
+
+        self.supervisor_token = os.environ.get(SUPERVISOR_TOKEN_ENV)
+
+        self.token_debug = {
+            "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
+            "options_json_path": ADDON_OPTIONS_PATH,
+            "access_token_in_options": bool(access_token),
+            "HOMEASSISTANT_TOKEN_env": bool(os.environ.get(HOMEASSISTANT_TOKEN_ENV)),
+            "SUPERVISOR_TOKEN_env": bool(os.environ.get(SUPERVISOR_TOKEN_ENV)),
+            "user_token_length": len(self.user_token) if self.user_token else 0,
+            "supervisor_token_length": len(self.supervisor_token) if self.supervisor_token else 0,
+            "ha_urls": HA_URLS,
+        }
 
     def _headers(self, token: Optional[str]) -> Dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if token:
-            h["Authorization"] = f"Bearer {token}"
-        return h
+        return {
+            "Authorization": f"Bearer {token}" if token else "",
+            "Content-Type": "application/json",
+        }
 
+    # ✅ Fix 1: Update _test_connection with better error handling
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -276,23 +181,46 @@ class HAConnection:
 
             debug["status_code"] = r.status_code
             debug["response_length"] = len(r.text)
-            debug["response_headers"] = dict(r.headers)
+            debug["content_type"] = r.headers.get("Content-Type", "")
 
             if r.status_code == 200:
                 try:
+                    # ✅ Check of response überhaupt JSON is
+                    content_type = r.headers.get("Content-Type", "")
+                    if "application/json" not in content_type:
+                        debug["error"] = f"Response is geen JSON (Content-Type: {content_type})"
+                        debug["response_text"] = r.text[:500]
+                        return False, "Geen JSON response", debug
+
+                    # ✅ Probeer JSON te parsen
                     data = r.json()
                     debug["response_message"] = data.get("message", "")
                     debug["response_data"] = str(data)[:200]
-                except Exception as e:
+                    return True, "OK", debug
+
+                except json.JSONDecodeError as e:
                     debug["json_error"] = str(e)
-                    debug["response_text"] = r.text[:200]
-                return True, "OK", debug
+                    debug["response_text"] = r.text[:500]
+                    debug["error"] = f"JSON parse error: {str(e)}"
+
+                    # ✅ Check of het misschien HTML is (login page)
+                    if r.text.strip().startswith("<"):
+                        debug["error"] = "Response is HTML (mogelijk login page)"
+                        return False, "HTML response (geen API)", debug
+
+                    return False, f"Ongeldige JSON: {str(e)[:50]}", debug
+                except Exception as e:
+                    debug["parse_error"] = str(e)
+                    debug["response_text"] = r.text[:500]
+                    return False, f"Parse error: {str(e)[:50]}", debug
 
             if r.status_code == 401:
                 debug["error"] = "Unauthorized - token werkt niet"
+                debug["response_text"] = r.text[:300]
                 return False, "Token ongeldig (401)", debug
             if r.status_code == 403:
                 debug["error"] = "Forbidden - geen toegang"
+                debug["response_text"] = r.text[:300]
                 return False, "Geen toegang (403)", debug
 
             debug["error"] = f"HTTP {r.status_code}"
@@ -309,6 +237,7 @@ class HAConnection:
             debug["error"] = f"Exception: {str(e)[:200]}"
             return False, str(e)[:100], debug
 
+    # ✅ Fix 3: Update probe with better error reporting
     def probe(self, force: bool = False) -> Tuple[bool, str]:
         if self.active_base_url and self.active_token and not force:
             return True, f"cached:{self.active_mode}"
@@ -330,17 +259,30 @@ class HAConnection:
 
         if not attempts:
             msg = (
-                "❌ Geen tokens gevonden! Voeg 'access_token' toe in add-on opties.\n"
-                f"Debug: {self.token_debug}"
+                "❌ Geen tokens gevonden!\n\n"
+                "Oplossing:\n"
+                "1. Ga naar je Home Assistant profiel\n"
+                "2. Scroll naar 'Long-Lived Access Tokens'\n"
+                "3. Klik 'Create Token'\n"
+                "4. Kopieer de token\n"
+                "5. Plak in add-on configuratie als 'access_token'\n\n"
+                f"Debug info:\n{json.dumps(self.token_debug, indent=2)}"
             )
             self.last_probe = msg
             return False, msg
 
         print(f"\n🔍 Probing {len(attempts)} connection attempts...")
+
+        all_errors = []
+
         for url, token, mode in attempts:
             success, message, debug = self._test_connection(url, token, mode)
             self.probe_attempts.append(debug)
             print(f"  {'✓' if success else '✗'} {mode:12} {url:35} → {message}")
+
+            if not success:
+                error_detail = debug.get("error", message)
+                all_errors.append(f"{mode} @ {url}: {error_detail}")
 
             if success:
                 self.active_base_url = url
@@ -350,17 +292,28 @@ class HAConnection:
                 print(f"  ✅ Using: {mode} via {url}\n")
                 return True, f"OK via {mode} ({url})"
 
-        error_msg = "❌ Alle verbindingen gefaald!\n\nGeprobeerd:\n"
-        for att in self.probe_attempts:
-            error_msg += f"  • {att['mode']} {att['url']}: {att.get('error', 'unknown')}\n"
-        error_msg += "\n💡 Oplossing:\n"
-        error_msg += "- Maak een Long-Lived Access Token in Home Assistant (profiel)\n"
-        error_msg += "- Zet hem in de add-on opties als: access_token\n"
+        error_msg = "❌ Alle verbindingen gefaald!\n\n"
+        error_msg += "Geprobeerde verbindingen:\n"
+        for err in all_errors:
+            error_msg += f"  • {err}\n"
+
+        error_msg += "\n💡 Veelvoorkomende oorzaken:\n"
+        error_msg += "1. Token is niet correct of verlopen\n"
+        error_msg += "2. Home Assistant is niet bereikbaar\n"
+        error_msg += "3. Firewall/netwerk probleem\n"
+        error_msg += "4. Token heeft niet genoeg rechten\n\n"
+
+        error_msg += "🔧 Oplossing:\n"
+        error_msg += "1. Maak nieuwe Long-Lived Access Token in HA\n"
+        error_msg += "2. Zet token in add-on opties: access_token\n"
+        error_msg += "3. Herstart de add-on\n"
+        error_msg += "4. Check add-on logs voor details\n"
 
         self.last_probe = error_msg
         print(error_msg)
         return False, error_msg
 
+    # ✅ Fix 4: Improved request method with response validation logging
     def request(self, method: str, path: str, json_body: dict | None = None, timeout: int = 15) -> requests.Response:
         ok, _ = self.probe(force=False)
         if not ok or not self.active_base_url:
@@ -372,97 +325,105 @@ class HAConnection:
             path = "/" + path
 
         url = f"{self.active_base_url}{path}"
-        r = requests.request(
-            method,
-            url,
-            headers=self._headers(self.active_token),
-            json=json_body,
-            timeout=timeout,
-            verify=False
-        )
 
-        if r.status_code in (401, 403):
-            self.active_base_url = None
-            self.active_token = None
-            self.active_mode = "unknown"
-            ok3, _ = self.probe(force=True)
-            if ok3 and self.active_base_url:
-                url = f"{self.active_base_url}{path}"
-                r = requests.request(
-                    method,
-                    url,
-                    headers=self._headers(self.active_token),
-                    json=json_body,
-                    timeout=timeout,
-                    verify=False
-                )
+        try:
+            r = requests.request(
+                method,
+                url,
+                headers=self._headers(self.active_token),
+                json=json_body,
+                timeout=timeout,
+                verify=False
+            )
 
-        return r
+            print(f"📡 {method} {path} → {r.status_code} ({r.headers.get('Content-Type', 'unknown')})")
+
+            if r.status_code in (401, 403):
+                print("⚠️ Auth error, re-probing...")
+                self.active_base_url = None
+                self.active_token = None
+                self.active_mode = "unknown"
+                ok3, _ = self.probe(force=True)
+                if ok3 and self.active_base_url:
+                    url = f"{self.active_base_url}{path}"
+                    r = requests.request(
+                        method,
+                        url,
+                        headers=self._headers(self.active_token),
+                        json=json_body,
+                        timeout=timeout,
+                        verify=False
+                    )
+
+            return r
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Request failed: {method} {path} - {str(e)}")
+            raise
+
 
 conn = HAConnection()
 
-def ha_call_service(domain: str, service: str, data: dict | None = None) -> Tuple[Dict[str, Any], int]:
+# -----------------------------------------------------------------------------
+# HA helpers
+# -----------------------------------------------------------------------------
+def safe_get_states() -> List[Dict[str, Any]]:
     try:
-        resp = conn.request("POST", f"/api/services/{domain}/{service}", json_body=(data or {}), timeout=15)
-        if resp.status_code not in (200, 201):
-            return {"ok": False, "error": f"{domain}.{service} failed: {resp.status_code}", "details": resp.text[:2000]}, 400
-        try:
-            return {"ok": True, "result": resp.json()}, 200
-        except Exception:
-            return {"ok": True, "result": resp.text}, 200
+        r = conn.request("GET", "/api/states", timeout=25)
+        if r.status_code == 200:
+            return r.json()
     except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
+        print(f"safe_get_states error: {e}")
+    return []
 
-# -------------------------
-# HA data helpers
-# -------------------------
-def get_states() -> List[Dict[str, Any]]:
-    try:
-        r = conn.request("GET", "/api/states", timeout=12)
-        if r.status_code != 200:
-            return []
-        return r.json()
-    except Exception:
-        return []
 
 def get_area_registry() -> List[Dict[str, Any]]:
     try:
-        r = conn.request("GET", "/api/config/area_registry", timeout=12)
-        if r.status_code != 200:
-            return []
-        return r.json()
-    except Exception:
-        return []
+        r = conn.request("GET", "/api/config/area_registry", timeout=20)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"get_area_registry error: {e}")
+    return []
+
 
 def get_entity_registry() -> List[Dict[str, Any]]:
+    """Haal entity registry op (voor area_id mapping)"""
     try:
-        r = conn.request("GET", "/api/config/entity_registry", timeout=12)
-        if r.status_code != 200:
-            return []
+        r = conn.request("GET", "/api/config/entity_registry", timeout=20)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"get_entity_registry error: {e}")
+    return []
+
+
+def ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    payload = data or {}
+    r = conn.request("POST", f"/api/services/{domain}/{service}", json_body=payload, timeout=20)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Service call failed: {domain}.{service} HTTP {r.status_code} - {r.text[:200]}")
+    try:
         return r.json()
     except Exception:
-        return []
+        return {"ok": True}
 
-def safe_get_states() -> List[Dict[str, Any]]:
-    """Safely get states with fallback"""
+
+def get_lovelace_resources() -> List[Dict[str, Any]]:
     try:
-        states = get_states()
-        if not states:
-            return [{
-                "entity_id": "sun.sun",
-                "state": "above_horizon",
-                "attributes": {}
-            }]
-        return states
+        r = conn.request("GET", "/api/lovelace/resources", timeout=20)
+        if r.status_code == 200:
+            return r.json()
     except Exception as e:
-        print(f"Error getting states: {e}")
-        return []
+        print(f"get_lovelace_resources error: {e}")
+    return []
 
-# -------------------------
-# Mushroom install + resources
-# -------------------------
+
+# -----------------------------------------------------------------------------
+# Mushroom install / resource
+# -----------------------------------------------------------------------------
+# ✅ Fix 2: Update mushroom_installed check (multi paths + JS scan)
 def mushroom_installed() -> bool:
-    # Check multiple possible locations for the dist folder
     possible_paths = [
         os.path.join(MUSHROOM_PATH, "dist"),
         os.path.join(MUSHROOM_PATH, "build"),
@@ -473,7 +434,7 @@ def mushroom_installed() -> bool:
         if os.path.exists(check_path):
             try:
                 all_files: List[str] = []
-                for _root, _dirs, files in os.walk(check_path):
+                for root, _dirs, files in os.walk(check_path):
                     all_files.extend([f for f in files if f.endswith(".js")])
                 if all_files:
                     print(f"✓ Mushroom JS gevonden: {len(all_files)} files in {check_path}")
@@ -483,18 +444,18 @@ def mushroom_installed() -> bool:
 
     return False
 
+
+# ✅ Fix 1: Update download_and_extract_zip (temp extract + move)
 def download_and_extract_zip(url: str, target_dir: str):
     print(f"Downloading Mushroom from: {url}")
     r = requests.get(url, timeout=45, verify=False)
     r.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-        # Extract to temp location first
         temp_extract = os.path.join(target_dir, "_temp_extract")
         os.makedirs(temp_extract, exist_ok=True)
         z.extractall(temp_extract)
 
-    # Find the extracted folder
     extracted_items = os.listdir(temp_extract)
     if not extracted_items:
         shutil.rmtree(temp_extract)
@@ -503,149 +464,86 @@ def download_and_extract_zip(url: str, target_dir: str):
     source_folder = os.path.join(temp_extract, extracted_items[0])
     final_path = os.path.join(target_dir, "lovelace-mushroom")
 
-    # Remove old install if exists
     if os.path.exists(final_path):
         shutil.rmtree(final_path)
 
-    # Move to final location
     shutil.move(source_folder, final_path)
     shutil.rmtree(temp_extract)
 
     print(f"Mushroom geïnstalleerd in: {final_path}")
 
+
 def install_mushroom() -> str:
-    os.makedirs(WWW_COMMUNITY, exist_ok=True)
+    ensure_dir(COMMUNITY_PATH)
     if mushroom_installed():
-        return "Mushroom kaarten zijn al geïnstalleerd"
-    download_and_extract_zip(MUSHROOM_GITHUB_ZIP, WWW_COMMUNITY)
-    if not mushroom_installed():
-        raise RuntimeError("Mushroom install faalde: geen JS bestanden gevonden.")
-    return "Mushroom kaarten geïnstalleerd"
+        return "✅ Mushroom al geïnstalleerd"
 
-def get_lovelace_resources() -> List[Dict[str, Any]]:
-    try:
-        r = conn.request("GET", "/api/lovelace/resources", timeout=12)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    opts = _read_options_json()
+    zip_url = (opts.get("mushroom_zip_url") or DEFAULT_MUSHROOM_ZIP).strip()
 
+    download_and_extract_zip(zip_url, COMMUNITY_PATH)
+    return "✅ Mushroom geïnstalleerd"
+
+
+# ✅ Fix 3: ensure_mushroom_resource with CDN fallback
 def ensure_mushroom_resource() -> str:
-    # Try local install first
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
-    # Fallback to CDN
     cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
 
     resources = get_lovelace_resources()
 
-    # Check if already registered
     for res in resources:
-        url = (res.get("url", "") or "")
-        if local_url in url or "mushroom" in url.lower():
-            return "Mushroom resource staat goed"
+        url = res.get("url", "")
+        if local_url in url or "mushroom" in url:
+            return "✅ Mushroom resource staat goed"
 
-    # Try local first, then CDN
     for url_to_try in [local_url, cdn_url]:
         payload = {"type": "module", "url": url_to_try}
         try:
             r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
             if r.status_code in (200, 201):
                 source = "lokaal" if "local" in url_to_try else "CDN"
-                return f"Mushroom resource toegevoegd ({source})"
+                return f"✅ Mushroom resource toegevoegd ({source})"
         except Exception as e:
             print(f"Resource registration via {url_to_try} failed: {e}")
             continue
 
-    return "Mushroom resource (best effort) OK"
+    return "✅ Mushroom resource (best effort) OK"
 
-# -------------------------
-# Theme generator
-# -------------------------
-THEME_PRESETS = {
-    "indigo_luxe": {"label": "Indigo Luxe", "primary": "#6366f1", "accent": "#8b5cf6"},
-    "emerald_fresh": {"label": "Emerald Fresh", "primary": "#10b981", "accent": "#34d399"},
-    "amber_warm": {"label": "Amber Warm", "primary": "#f59e0b", "accent": "#f97316"},
-    "rose_neon": {"label": "Rose Neon", "primary": "#f43f5e", "accent": "#fb7185"},
-    "midnight_pro": {"label": "Midnight Pro", "primary": "#0ea5e9", "accent": "#a78bfa"},
-}
 
-def build_theme_yaml(primary: str, accent: str, density: str = "comfy") -> str:
-    if density not in ("comfy", "compact"):
-        density = "comfy"
-    radius = "18px" if density == "comfy" else "14px"
-    shadow = "0 18px 40px rgba(0,0,0,0.14)" if density == "comfy" else "0 12px 26px rgba(0,0,0,0.14)"
-    card_pad = "14px" if density == "comfy" else "10px"
-
-    return f"""
-{THEME_NAME}:
-  primary-color: "{primary}"
-  accent-color: "{accent}"
-
-  font-family: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial"
-  paper-font-common-base_-_font-family: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial"
-
-  ha-card-border-radius: "{radius}"
-  ha-card-box-shadow: "{shadow}"
-  ha-card-background: "rgba(255,255,255,0.92)"
-
-  card-mod-theme: "{THEME_NAME}"
-  card-mod-card: |
-    ha-card {{
-      padding: {card_pad};
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      border: 1px solid rgba(15, 23, 42, 0.06);
-    }}
-
-  primary-background-color: "#f8fafc"
-  secondary-background-color: "#eef2ff"
-  app-header-background-color: "rgba(255,255,255,0.80)"
-  app-header-text-color: "#0f172a"
-
-  primary-text-color: "#0f172a"
-  secondary-text-color: "rgba(15, 23, 42, 0.72)"
-  disabled-text-color: "rgba(15, 23, 42, 0.42)"
-  divider-color: "rgba(15, 23, 42, 0.08)"
-
-  paper-item-icon-color: "{primary}"
-  paper-item-icon-active-color: "{accent}"
-  paper-toggle-button-checked-button-color: "{primary}"
-  paper-toggle-button-checked-bar-color: "{accent}"
-
+# -----------------------------------------------------------------------------
+# Theme (simple placeholder theme installer)
+# -----------------------------------------------------------------------------
+def install_dashboard_theme(preset: str, density: str) -> str:
+    ensure_dir(DASHBOARD_THEME_DIR)
+    # Minimal theme content; you can expand this.
+    content = f"""# Dashboard Maker Theme
+dashboard_maker:
   modes:
+    light:
+      primary-color: "#4f46e5"
     dark:
-      primary-background-color: "#0b1220"
-      secondary-background-color: "#0f172a"
-      ha-card-background: "rgba(2,6,23,0.86)"
-      app-header-background-color: "rgba(2,6,23,0.66)"
-      app-header-text-color: "#e5e7eb"
-      primary-text-color: "#e5e7eb"
-      secondary-text-color: "rgba(229, 231, 235, 0.72)"
-      divider-color: "rgba(229, 231, 235, 0.08)"
-      paper-item-icon-color: "{primary}"
-      paper-item-icon-active-color: "{accent}"
-""".strip() + "\n"
+      primary-color: "#a78bfa"
+  dashboard_density: "{density}"
+  preset: "{preset}"
+"""
+    write_text_file(DASHBOARD_THEME_FILE, content)
+    return "✅ Theme geïnstalleerd"
 
-def install_dashboard_theme(preset_key: str, density: str) -> str:
-    preset = THEME_PRESETS.get(preset_key) or THEME_PRESETS["indigo_luxe"]
-    theme_yaml = build_theme_yaml(primary=preset["primary"], accent=preset["accent"], density=density)
-    write_text_file(DASHBOARD_THEME_FILE, theme_yaml)
-    return f"Theme geschreven: {preset['label']}"
 
 def try_set_theme_auto() -> str:
-    r, st = ha_call_service("frontend", "set_theme", {"name": THEME_NAME, "mode": "auto"})
-    if st == 200 and r.get("ok"):
-        return "Theme actief (auto licht/donker)"
-    r2, st2 = ha_call_service("frontend", "set_theme", {"name": THEME_NAME})
-    if st2 == 200 and r2.get("ok"):
-        return "Theme actief (fallback)"
-    return "Theme geïnstalleerd (activeren niet gelukt)"
+    # Setting the theme automatically via service is optional; keep best-effort.
+    try:
+        ha_call_service("frontend", "set_theme", {"name": "dashboard_maker", "mode": "auto"})
+        return "✅ Theme geactiveerd (auto)"
+    except Exception as e:
+        print(f"try_set_theme_auto warning: {e}")
+        return "⚠️ Theme activeren niet gelukt (best effort)"
 
-# -------------------------
-# configuration.yaml helpers
-# -------------------------
+
+# -----------------------------------------------------------------------------
+# configuration.yaml lovelace helpers (backup + ensure + validation)
+# -----------------------------------------------------------------------------
 def backup_configuration_yaml() -> Optional[str]:
     """Maak backup van configuration.yaml"""
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
@@ -656,12 +554,14 @@ def backup_configuration_yaml() -> Optional[str]:
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(HA_CONFIG_PATH, f"configuration.yaml.backup_{timestamp}")
+
         shutil.copy2(config_yaml_path, backup_path)
         print(f"💾 Backup gemaakt: {backup_path}")
         return backup_path
     except Exception as e:
         print(f"⚠️ Backup gefaald: {e}")
         return None
+
 
 def ensure_lovelace_config() -> Tuple[bool, str]:
     """Zorgt dat lovelace config correct staat in configuration.yaml"""
@@ -723,8 +623,11 @@ def ensure_lovelace_config() -> Tuple[bool, str]:
 
     return True, "Lovelace config al correct"
 
-def register_dashboard_in_lovelace(filename: str, title: str) -> str:
-    """Registreer dashboard in configuration.yaml met auto-setup van lovelace sectie"""
+
+def register_dashboard_in_lovelace(filename: str, title: str, editable: bool = False) -> str:
+    """Registreer dashboard in configuration.yaml met auto-setup van lovelace sectie
+    (editable param wordt geaccepteerd maar in YAML-mode is dit gewoon een YAML dashboard)
+    """
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
     ok, msg = ensure_lovelace_config()
@@ -742,8 +645,6 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
 
     lovelace = config.get("lovelace", {})
     dashboards = lovelace.get("dashboards", {})
-    if not isinstance(dashboards, dict):
-        dashboards = {}
 
     base_key = filename.replace(".yaml", "").replace("_", "-").replace(" ", "-").lower()
     base_key = re.sub(r"-?\d+$", "", base_key)
@@ -773,23 +674,24 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
 
         print(f"✅ Dashboard geregistreerd: {dashboard_key} -> {title}")
         print(f"   📁 Bestand: dashboards/{filename}")
-        print(f"   📌 Sidebar: enabled")
+        print("   📌 Sidebar: enabled")
         return f"Dashboard '{title}' geregistreerd als '{dashboard_key}'"
     except Exception as e:
         return f"Schrijven gefaald: {e}"
+
 
 def validate_configuration_yaml() -> Tuple[bool, str, Dict[str, Any]]:
     """Valideer configuration.yaml structuur"""
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
-    result: Dict[str, Any] = {
+    result = {
         "exists": False,
         "readable": False,
         "valid_yaml": False,
         "has_lovelace": False,
         "lovelace_mode": None,
         "dashboard_count": 0,
-        "errors": [],
+        "errors": []
     }
 
     if not os.path.exists(config_yaml_path):
@@ -817,6 +719,7 @@ def validate_configuration_yaml() -> Tuple[bool, str, Dict[str, Any]]:
         result["has_lovelace"] = True
         lovelace = config["lovelace"]
         result["lovelace_mode"] = lovelace.get("mode")
+
         if isinstance(lovelace.get("dashboards"), dict):
             result["dashboard_count"] = len(lovelace["dashboards"])
 
@@ -829,60 +732,32 @@ def validate_configuration_yaml() -> Tuple[bool, str, Dict[str, Any]]:
 
     return True, "Configuration.yaml is correct", result
 
-# -------------------------
-# Dashboard builders
-# -------------------------
-def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
-    """Bouwt een volledig dashboard met ALLE beschikbare Mushroom kaarten"""
-    states = safe_get_states()
-    _areas = get_area_registry()
 
-    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
-    switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")]
-    sensors = [e for e in states if (e.get("entity_id", "") or "").startswith("sensor.")]
-    climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")]
-    covers = [e for e in states if (e.get("entity_id", "") or "").startswith("cover.")]
-    fans = [e for e in states if (e.get("entity_id", "") or "").startswith("fan.")]
-    locks = [e for e in states if (e.get("entity_id", "") or "").startswith("lock.")]
-    media_players = [e for e in states if (e.get("entity_id", "") or "").startswith("media_player.")]
-    persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
-    vacuums = [e for e in states if (e.get("entity_id", "") or "").startswith("vacuum.")]
+# -----------------------------------------------------------------------------
+# Dashboard builders
+# -----------------------------------------------------------------------------
+def build_simple_single_page_dashboard(title: str) -> Dict[str, Any]:
+    """Simpel single-page dashboard voor beginners"""
+    states = safe_get_states()
 
     cards: List[Dict[str, Any]] = []
-
     cards.append({
         "type": "custom:mushroom-title-card",
-        "title": dashboard_title,
-        "subtitle": "{{ now().strftime('%d %B %Y • %H:%M') }}"
+        "title": title,
+        "subtitle": "{{ now().strftime('%d %B %Y') }}"
     })
 
-    chips = []
-    if persons:
-        chips.append({"type": "entity", "entity": persons[0]["entity_id"], "use_entity_picture": True})
-    if lights:
-        chips.append({"type": "template", "entity": lights[0]["entity_id"], "icon": "mdi:lightbulb", "tap_action": {"action": "toggle"}})
-    if chips:
-        cards.append({"type": "custom:mushroom-chips-card", "chips": chips, "alignment": "center"})
-
-    if persons:
-        cards.append({"type": "custom:mushroom-title-card", "title": "👤 Thuis"})
-        for person in persons[:4]:
-            cards.append({
-                "type": "custom:mushroom-person-card",
-                "entity": person["entity_id"],
-                "use_entity_picture": True
-            })
+    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")][:8]
+    switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")][:6]
+    climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")][:3]
 
     if lights:
         cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting"})
-        for light in lights[:8]:
+        for light in lights:
             cards.append({
                 "type": "custom:mushroom-light-card",
                 "entity": light["entity_id"],
-                "use_light_color": True,
-                "show_brightness_control": True,
-                "show_color_control": True,
-                "collapsible_controls": True
+                "use_light_color": True
             })
 
     if climate:
@@ -890,293 +765,731 @@ def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
         for c in climate:
             cards.append({
                 "type": "custom:mushroom-climate-card",
-                "entity": c["entity_id"],
-                "show_temperature_control": True,
-                "collapsible_controls": True
-            })
-
-    if covers:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Rolluiken"})
-        for cover in covers[:6]:
-            cards.append({
-                "type": "custom:mushroom-cover-card",
-                "entity": cover["entity_id"],
-                "show_buttons_control": True,
-                "show_position_control": True,
-                "collapsible_controls": True
-            })
-
-    if fans:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🌀 Ventilatoren"})
-        for fan in fans:
-            cards.append({
-                "type": "custom:mushroom-fan-card",
-                "entity": fan["entity_id"],
-                "show_percentage_control": True,
-                "collapsible_controls": True
-            })
-
-    if media_players:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media"})
-        for mp in media_players[:4]:
-            cards.append({
-                "type": "custom:mushroom-media-player-card",
-                "entity": mp["entity_id"],
-                "use_media_info": True,
-                "show_volume_level": True,
-                "collapsible_controls": True
-            })
-
-    if vacuums:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🤖 Stofzuigers"})
-        for vacuum in vacuums:
-            cards.append({
-                "type": "custom:mushroom-vacuum-card",
-                "entity": vacuum["entity_id"],
-                "commands": ["start_pause", "stop", "locate", "return_home"]
-            })
-
-    if locks:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔒 Sloten"})
-        for lock in locks:
-            cards.append({
-                "type": "custom:mushroom-lock-card",
-                "entity": lock["entity_id"]
+                "entity": c["entity_id"]
             })
 
     if switches:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars"})
-        for sw in switches[:8]:
+        cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Apparaten"})
+        for sw in switches:
             cards.append({
                 "type": "custom:mushroom-entity-card",
                 "entity": sw["entity_id"],
                 "tap_action": {"action": "toggle"}
             })
 
-    temp_sensors = [s for s in sensors if "temperature" in (s.get("entity_id", "").lower())]
-    if temp_sensors:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Temperaturen"})
-        for temp in temp_sensors[:6]:
-            cards.append({
-                "type": "custom:mushroom-entity-card",
-                "entity": temp["entity_id"],
-                "icon": "mdi:thermometer"
-            })
-
-    if len(cards) == 1:
-        cards.append({
-            "type": "markdown",
-            "content": f"# {dashboard_title}\n\n✅ Dashboard aangemaakt!\n\nVoeg handmatig kaarten toe via de UI editor."
-        })
-
     return {
-        "title": dashboard_title,
+        "title": title,
         "views": [{
-            "title": "Home",
+            "title": "Overzicht",
             "path": "home",
-            "icon": "mdi:home",
+            "icon": "mdi:view-dashboard",
             "type": "sections",
-            "sections": [{
-                "type": "grid",
-                "cards": cards
-            }]
+            "sections": [{"type": "grid", "cards": cards}]
         }]
     }
 
-def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
-    """Bouwt een demo dashboard met ALLE Mushroom kaart types"""
+
+# ✅ Fix 1: New Area-Based multi-page builder (as requested)
+def build_area_based_dashboard(title: str) -> Dict[str, Any]:
+    """Bouwt een multi-page dashboard gebaseerd op areas/kamers"""
     states = safe_get_states()
+    areas = get_area_registry()
+    entity_registry = get_entity_registry()
 
-    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
-    switches = [e for e in states if (e.get("entity_id", "") or "").startswith("switch.")]
-    sensors = [e for e in states if (e.get("entity_id", "") or "").startswith("sensor.")]
-    climate = [e for e in states if (e.get("entity_id", "") or "").startswith("climate.")]
-    covers = [e for e in states if (e.get("entity_id", "") or "").startswith("cover.")]
-    fans = [e for e in states if (e.get("entity_id", "") or "").startswith("fan.")]
-    locks = [e for e in states if (e.get("entity_id", "") or "").startswith("lock.")]
-    media_players = [e for e in states if (e.get("entity_id", "") or "").startswith("media_player.")]
-    persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
-    vacuums = [e for e in states if (e.get("entity_id", "") or "").startswith("vacuum.")]
-    alarms = [e for e in states if (e.get("entity_id", "") or "").startswith("alarm_control_panel.")]
+    entity_to_area: Dict[str, str] = {}
+    area_names: Dict[str, str] = {}
 
-    cards: List[Dict[str, Any]] = []
+    for area in areas:
+        area_id = area.get("area_id", "")
+        area_name = area.get("name", "")
+        if area_id and area_name:
+            area_names[area_id] = area_name
 
-    cards.append({
+    for ent_reg in entity_registry:
+        entity_id = ent_reg.get("entity_id", "")
+        area_id = ent_reg.get("area_id", "")
+        if entity_id and area_id:
+            entity_to_area[entity_id] = area_id
+
+    entities_by_area: Dict[str, List[Dict[str, Any]]] = {}
+    entities_without_area: List[Dict[str, Any]] = []
+
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        if not entity_id:
+            continue
+
+        area_id = entity_to_area.get(entity_id)
+        if area_id:
+            if area_id not in entities_by_area:
+                entities_by_area[area_id] = []
+            entities_by_area[area_id].append(state)
+        else:
+            entities_without_area.append(state)
+
+    views: List[Dict[str, Any]] = []
+
+    # VIEW 1: HOME/OVERVIEW
+    home_cards: List[Dict[str, Any]] = []
+
+    home_cards.append({
         "type": "custom:mushroom-title-card",
-        "title": "🎨 " + dashboard_title,
-        "subtitle": "Showcase van alle Mushroom kaarten • {{ now().strftime('%d %B %Y') }}"
+        "title": "Hallo! 👋",
+        "subtitle": "{{ now().strftime('%-d %B %Y') }}"
     })
 
-    # Chips
     chips: List[Dict[str, Any]] = []
+    persons = [e for e in states if (e.get("entity_id", "") or "").startswith("person.")]
+    lights = [e for e in states if (e.get("entity_id", "") or "").startswith("light.")]
+
+    if persons:
+        chips.append({"type": "entity", "entity": persons[0]["entity_id"], "use_entity_picture": True})
     if lights:
+        light_count = len([l for l in lights if (l.get("state") or "") == "on"])
         chips.append({
             "type": "template",
-            "entity": lights[0]["entity_id"],
-            "icon": "mdi:lightbulb",
-            "content": "{{ states(entity) }}",
-            "tap_action": {"action": "toggle"}
+            "icon": "mdi:lightbulb-group",
+            "content": f"{light_count} aan",
+            "tap_action": {"action": "none"}
         })
-    if persons:
-        chips.append({
-            "type": "entity",
-            "entity": persons[0]["entity_id"],
-            "icon": "mdi:account",
-            "use_entity_picture": True
-        })
+
+    power_sensors = [
+        e for e in states
+        if "power" in (e.get("entity_id", "") or "").lower() and "sensor." in (e.get("entity_id", "") or "")
+    ]
+    if power_sensors:
+        chips.append({"type": "entity", "entity": power_sensors[0]["entity_id"]})
+
     if chips:
-        cards.append({
-            "type": "custom:mushroom-chips-card",
-            "chips": chips,
-            "alignment": "center"
+        home_cards.append({"type": "custom:mushroom-chips-card", "chips": chips, "alignment": "center"})
+
+    for area_id, area_entities in sorted(entities_by_area.items()):
+        area_name = area_names.get(area_id, area_id)
+
+        area_lights = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("light.")]
+        area_climate = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("climate.")]
+        area_temp = [e for e in area_entities if "temperature" in (e.get("entity_id", "") or "").lower()]
+
+        icon = "mdi:home"
+        low = area_name.lower()
+        if "woonkamer" in low or "living" in low:
+            icon = "mdi:sofa"
+        elif "slaapkamer" in low or "bedroom" in low:
+            icon = "mdi:bed"
+        elif "keuken" in low or "kitchen" in low:
+            icon = "mdi:chef-hat"
+        elif "badkamer" in low or "bathroom" in low:
+            icon = "mdi:shower"
+        elif "zolder" in low or "attic" in low:
+            icon = "mdi:home-roof"
+        elif "kantoor" in low or "office" in low:
+            icon = "mdi:desk"
+        elif "tuin" in low or "garden" in low:
+            icon = "mdi:flower"
+
+        temp_info = ""
+        if area_temp:
+            temp_info = f"{{{{ states('{area_temp[0]['entity_id']}') }}}}°C"
+        elif area_climate:
+            temp_info = f"{{{{ state_attr('{area_climate[0]['entity_id']}', 'current_temperature') }}}}°C"
+
+        light_info = ""
+        if area_lights:
+            on_count = len([l for l in area_lights if (l.get("state") or "") == "on"])
+            light_info = f"{on_count}/{len(area_lights)} lampen"
+
+        secondary_text = " | ".join(filter(None, [temp_info, light_info]))
+
+        home_cards.append({
+            "type": "custom:mushroom-template-card",
+            "primary": area_name,
+            "secondary": secondary_text or "Klik voor details",
+            "icon": icon,
+            "icon_color": "blue",
+            "tap_action": {
+                "action": "navigate",
+                "navigation_path": f"#{sanitize_filename(area_name).replace('_', '-')}"
+            },
+            "card_mod": {
+                "style": "ha-card { background: rgba(var(--rgb-primary-color), 0.05); }"
+            }
         })
 
-    if lights:
-        cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting", "subtitle": "Light cards met kleuren en helderheid"})
-        for light in lights[:4]:
-            cards.append({
-                "type": "custom:mushroom-light-card",
-                "entity": light["entity_id"],
-                "use_light_color": True,
-                "show_brightness_control": True,
-                "show_color_control": True,
-                "show_color_temp_control": True,
-                "collapsible_controls": True,
-                "tap_action": {"action": "toggle"},
-                "hold_action": {"action": "more-info"}
-            })
+    if entities_without_area:
+        home_cards.append({"type": "custom:mushroom-title-card", "title": "Overig"})
 
-    if climate:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat", "subtitle": "Thermostaat bediening"})
-        for c in climate[:3]:
-            cards.append({
-                "type": "custom:mushroom-climate-card",
-                "entity": c["entity_id"],
-                "show_temperature_control": True,
-                "collapsible_controls": True
-            })
+        for entity in entities_without_area[:6]:
+            entity_id = entity.get("entity_id", "")
+            if entity_id.startswith("light."):
+                home_cards.append({
+                    "type": "custom:mushroom-light-card",
+                    "entity": entity_id,
+                    "use_light_color": True
+                })
+            elif entity_id.startswith("switch."):
+                home_cards.append({
+                    "type": "custom:mushroom-entity-card",
+                    "entity": entity_id,
+                    "tap_action": {"action": "toggle"}
+                })
 
-    if covers:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Rolluiken & Gordijnen", "subtitle": "Cover cards"})
-        for cover in covers[:3]:
-            cards.append({
-                "type": "custom:mushroom-cover-card",
-                "entity": cover["entity_id"],
-                "show_buttons_control": True,
-                "show_position_control": True,
-                "collapsible_controls": True
-            })
-
-    if fans:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🌀 Ventilatoren", "subtitle": "Fan cards met snelheid"})
-        for fan in fans[:3]:
-            cards.append({
-                "type": "custom:mushroom-fan-card",
-                "entity": fan["entity_id"],
-                "show_percentage_control": True,
-                "show_oscillate_control": True,
-                "collapsible_controls": True
-            })
-
-    if locks:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔒 Sloten", "subtitle": "Lock cards"})
-        for lock in locks[:3]:
-            cards.append({
-                "type": "custom:mushroom-lock-card",
-                "entity": lock["entity_id"]
-            })
-
-    if media_players:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media Spelers", "subtitle": "Media player cards"})
-        for mp in media_players[:3]:
-            cards.append({
-                "type": "custom:mushroom-media-player-card",
-                "entity": mp["entity_id"],
-                "use_media_info": True,
-                "show_volume_level": True,
-                "collapsible_controls": True
-            })
-
-    if persons:
-        cards.append({"type": "custom:mushroom-title-card", "title": "👤 Personen", "subtitle": "Person cards met aanwezigheid"})
-        for person in persons[:4]:
-            cards.append({
-                "type": "custom:mushroom-person-card",
-                "entity": person["entity_id"],
-                "use_entity_picture": True
-            })
-
-    if vacuums:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🤖 Stofzuigers", "subtitle": "Vacuum cards"})
-        for vacuum in vacuums[:2]:
-            cards.append({
-                "type": "custom:mushroom-vacuum-card",
-                "entity": vacuum["entity_id"],
-                "commands": ["start_pause", "stop", "locate", "clean_spot", "return_home"],
-            })
-
-    if alarms:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🚨 Alarm", "subtitle": "Alarm control panel"})
-        for alarm in alarms[:2]:
-            cards.append({
-                "type": "custom:mushroom-alarm-control-panel-card",
-                "entity": alarm["entity_id"],
-                "states": ["armed_home", "armed_away", "armed_night", "disarmed"]
-            })
-
-    if switches:
-        cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Schakelaars", "subtitle": "Entity cards voor schakelaars"})
-        for sw in switches[:6]:
-            cards.append({
-                "type": "custom:mushroom-entity-card",
-                "entity": sw["entity_id"],
-                "tap_action": {"action": "toggle"}
-            })
-
-    temp_sensors = [s for s in sensors if "temperature" in (s.get("entity_id", "").lower())]
-    humidity_sensors = [s for s in sensors if "humidity" in (s.get("entity_id", "").lower())]
-
-    if temp_sensors or humidity_sensors:
-        cards.append({"type": "custom:mushroom-title-card", "title": "📊 Sensoren", "subtitle": "Entity cards voor metingen"})
-        for temp in temp_sensors[:3]:
-            cards.append({"type": "custom:mushroom-entity-card", "entity": temp["entity_id"], "icon": "mdi:thermometer"})
-        for hum in humidity_sensors[:3]:
-            cards.append({"type": "custom:mushroom-entity-card", "entity": hum["entity_id"], "icon": "mdi:water-percent"})
-
-    cards.append({"type": "custom:mushroom-title-card", "title": "✨ Template Cards", "subtitle": "Dynamische custom content"})
-    cards.append({
-        "type": "custom:mushroom-template-card",
-        "primary": "Welkom thuis!",
-        "secondary": "{{ now().strftime('%H:%M') }}",
-        "icon": "mdi:home-assistant",
-        "tap_action": {"action": "none"}
+    views.append({
+        "title": "Home",
+        "path": "home",
+        "icon": "mdi:home",
+        "type": "sections",
+        "sections": [{
+            "type": "grid",
+            "cards": home_cards,
+            "column_span": 1
+        }]
     })
 
-    if len(cards) <= 2:
-        cards.append({
-            "type": "markdown",
-            "content": f"# 🎨 {dashboard_title}\n\n✅ Demo dashboard aangemaakt.\n\nMaak je eigen dashboard via Stap 3."
+    # VIEW 2+: per area
+    for area_id, area_entities in sorted(entities_by_area.items()):
+        area_name = area_names.get(area_id, area_id)
+        area_path = sanitize_filename(area_name).replace("_", "-")
+
+        area_cards: List[Dict[str, Any]] = []
+
+        area_cards.append({
+            "type": "custom:mushroom-title-card",
+            "title": area_name,
+            "subtitle": "{{ now().strftime('%H:%M') }}"
         })
 
-    return {
-        "title": dashboard_title,
-        "views": [{
-            "title": "Demo",
-            "path": "demo",
-            "icon": "mdi:view-dashboard-variant",
+        area_lights = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("light.")]
+        area_switches = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("switch.")]
+        area_climate = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("climate.")]
+        area_covers = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("cover.")]
+        area_sensors = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("sensor.")]
+        area_media = [e for e in area_entities if (e.get("entity_id", "") or "").startswith("media_player.")]
+
+        if area_lights:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "💡 Verlichting"})
+            for light in area_lights:
+                area_cards.append({
+                    "type": "custom:mushroom-light-card",
+                    "entity": light["entity_id"],
+                    "use_light_color": True,
+                    "show_brightness_control": True,
+                    "show_color_control": True,
+                    "collapsible_controls": True
+                })
+
+        if area_climate:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "🌡️ Klimaat"})
+            for climate in area_climate:
+                area_cards.append({
+                    "type": "custom:mushroom-climate-card",
+                    "entity": climate["entity_id"],
+                    "show_temperature_control": True,
+                    "collapsible_controls": True
+                })
+
+        if area_covers:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "🪟 Raamdecoratie"})
+            for cover in area_covers:
+                area_cards.append({
+                    "type": "custom:mushroom-cover-card",
+                    "entity": cover["entity_id"],
+                    "show_buttons_control": True,
+                    "show_position_control": True,
+                    "collapsible_controls": True
+                })
+
+        if area_media:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "🎵 Media"})
+            for media in area_media:
+                area_cards.append({
+                    "type": "custom:mushroom-media-player-card",
+                    "entity": media["entity_id"],
+                    "use_media_info": True,
+                    "show_volume_level": True,
+                    "collapsible_controls": True
+                })
+
+        if area_switches:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "🔌 Apparaten"})
+            for switch in area_switches:
+                area_cards.append({
+                    "type": "custom:mushroom-entity-card",
+                    "entity": switch["entity_id"],
+                    "tap_action": {"action": "toggle"}
+                })
+
+        temp_sensors = [s for s in area_sensors if "temperature" in (s.get("entity_id", "") or "").lower()]
+        humidity_sensors = [s for s in area_sensors if "humidity" in (s.get("entity_id", "") or "").lower()]
+
+        if temp_sensors or humidity_sensors:
+            area_cards.append({"type": "custom:mushroom-title-card", "title": "📊 Metingen"})
+
+            for temp in temp_sensors[:3]:
+                area_cards.append({
+                    "type": "custom:mushroom-entity-card",
+                    "entity": temp["entity_id"],
+                    "icon": "mdi:thermometer"
+                })
+
+            for hum in humidity_sensors[:3]:
+                area_cards.append({
+                    "type": "custom:mushroom-entity-card",
+                    "entity": hum["entity_id"],
+                    "icon": "mdi:water-percent"
+                })
+
+        if len(area_cards) == 1:
+            area_cards.append({
+                "type": "markdown",
+                "content": f"# {area_name}\n\n✅ Nog geen devices toegevoegd aan deze ruimte.\n\nVoeg devices toe via Instellingen → Apparaten & Diensten."
+            })
+
+        views.append({
+            "title": area_name,
+            "path": area_path,
+            "icon": "mdi:door",
             "type": "sections",
             "sections": [{
                 "type": "grid",
-                "cards": cards,
+                "cards": area_cards,
                 "column_span": 1
             }]
-        }]
+        })
+
+    return {"title": title, "views": views}
+
+
+# ✅ Fix 2: build_comprehensive_demo_dashboard multi-page (as requested)
+def build_comprehensive_demo_dashboard(dashboard_title: str) -> Dict[str, Any]:
+    """Demo dashboard met Home overview + area pages"""
+    dashboard = build_area_based_dashboard(dashboard_title)
+
+    if len(dashboard["views"]) == 1:
+        demo_views = [
+            {
+                "title": "Woonkamer",
+                "path": "woonkamer",
+                "icon": "mdi:sofa",
+                "type": "sections",
+                "sections": [{
+                    "type": "grid",
+                    "cards": [
+                        {"type": "custom:mushroom-title-card", "title": "🛋️ Woonkamer", "subtitle": "Demo ruimte"},
+                        {"type": "markdown", "content": "# Woonkamer\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"}
+                    ]
+                }]
+            },
+            {
+                "title": "Slaapkamer",
+                "path": "slaapkamer",
+                "icon": "mdi:bed",
+                "type": "sections",
+                "sections": [{
+                    "type": "grid",
+                    "cards": [
+                        {"type": "custom:mushroom-title-card", "title": "🛏️ Slaapkamer", "subtitle": "Demo ruimte"},
+                        {"type": "markdown", "content": "# Slaapkamer\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"}
+                    ]
+                }]
+            },
+            {
+                "title": "Zolder",
+                "path": "zolder",
+                "icon": "mdi:home-roof",
+                "type": "sections",
+                "sections": [{
+                    "type": "grid",
+                    "cards": [
+                        {"type": "custom:mushroom-title-card", "title": "🏠 Zolder", "subtitle": "Demo ruimte"},
+                        {"type": "markdown", "content": "# Zolder\n\n✨ Dit is een voorbeeld.\n\nVoeg je eigen devices toe!"}
+                    ]
+                }]
+            }
+        ]
+        dashboard["views"].extend(demo_views)
+
+    return dashboard
+
+
+# ✅ Fix 3: build_dashboard_yaml production uses area-based
+def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
+    """Bouwt een volledig multi-page dashboard met area-based views"""
+    return build_area_based_dashboard(dashboard_title)
+
+
+# -----------------------------------------------------------------------------
+# (Optional) Storage import placeholder (keeps endpoint compatible)
+# -----------------------------------------------------------------------------
+def import_dashboard_to_storage(dashboard_key: str, yaml_code: str) -> Tuple[bool, str]:
+    """
+    Placeholder: echte storage-import is complex en HA-versie-afhankelijk.
+    We draaien in YAML-mode; daarom: return False maar met duidelijke uitleg.
+    """
+    return False, "Storage import not supported in YAML mode (YAML dashboard file is created instead)."
+
+
+# -----------------------------------------------------------------------------
+# API endpoints
+# -----------------------------------------------------------------------------
+@app.route("/", methods=["GET"])
+def index() -> Response:
+    html = HTML_PAGE.replace("__APP_NAME__", APP_NAME).replace("__APP_VERSION__", APP_VERSION)
+    return Response(html, mimetype="text/html")
+
+
+# ✅ Fix 5: api_config endpoint with better error info
+@app.route("/api/config", methods=["GET"])
+def api_config():
+    ok, msg = conn.probe(force=True)
+
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    response_data = {
+        "app_name": APP_NAME,
+        "app_version": APP_VERSION,
+        "ha_ok": bool(ok),
+        "ha_message": msg,
+        "active_mode": conn.active_mode,
+        "active_base_url": conn.active_base_url,
+
+        "configured_config_path": CONFIGURED_CONFIG_PATH,
+        "active_config_path": HA_CONFIG_PATH,
+        "dashboards_path": DASHBOARDS_PATH,
+        "config_yaml_path": config_yaml_path,
+        "config_yaml_exists": os.path.exists(config_yaml_path),
+        "config_yaml_writable": os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False,
+
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+        "mushroom_installed": mushroom_installed(),
+        "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
+        "options_json_found": os.path.exists(ADDON_OPTIONS_PATH),
+        "options_json_path": ADDON_OPTIONS_PATH,
+        "token_debug": conn.token_debug,
     }
 
-# -------------------------
-# HTML Wizard (fixed fetch paths + extra buttons + init lovelace UI)
-# -------------------------
-HTML_PAGE = r"""<!DOCTYPE html>
+    if not ok:
+        response_data["probe_attempts"] = conn.probe_attempts
+        response_data["detailed_errors"] = [
+            {
+                "url": attempt.get("url"),
+                "mode": attempt.get("mode"),
+                "error": attempt.get("error"),
+                "status_code": attempt.get("status_code"),
+                "content_type": attempt.get("content_type"),
+                "response_preview": attempt.get("response_text", "")[:200]
+            }
+            for attempt in conn.probe_attempts
+        ]
+
+    return jsonify(response_data)
+
+
+@app.route("/api/setup", methods=["POST"])
+def api_setup():
+    ok, msg = conn.probe(force=True)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 400
+
+    data = request.json or {}
+    preset = (data.get("preset") or "midnight_pro").strip()
+    density = (data.get("density") or "comfy").strip()
+
+    steps: List[str] = []
+
+    try:
+        ok_lovelace, msg_lovelace = ensure_lovelace_config()
+        steps.append(f"✅ {msg_lovelace}" if ok_lovelace else f"⚠️ {msg_lovelace}")
+
+        steps.append(install_mushroom())
+        steps.append(ensure_mushroom_resource())
+        steps.append(install_dashboard_theme(preset, density))
+        steps.append(try_set_theme_auto())
+
+        ha_call_service("homeassistant", "reload_core_config", {})
+        steps.append("✅ Core config herladen")
+        time.sleep(1)
+        ha_call_service("lovelace", "reload", {})
+        steps.append("✅ Lovelace herladen")
+
+        return jsonify({"ok": True, "steps": steps}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
+
+
+@app.route("/api/init_lovelace", methods=["POST"])
+def api_init_lovelace():
+    """Initialiseer lovelace config in configuration.yaml"""
+    try:
+        ok, msg = ensure_lovelace_config()
+
+        if ok:
+            ha_call_service("homeassistant", "reload_core_config", {})
+            return jsonify({
+                "success": True,
+                "message": msg,
+                "config_path": os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+            }), 200
+
+        return jsonify({"success": False, "error": msg}), 400
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ✅ Demo dashboard: write file, register, reload in correct order
+@app.route("/api/create_demo", methods=["POST"])
+def api_create_demo():
+    ok, msg = conn.probe(force=True)
+    if not ok:
+        return jsonify({"success": False, "error": msg}), 400
+
+    title = "WOW Demo Dashboard"
+    dash = build_comprehensive_demo_dashboard(title)
+    code = safe_yaml_dump(dash)
+    fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
+    write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
+
+    reg_msg = register_dashboard_in_lovelace(fn, title)
+
+    try:
+        ha_call_service("homeassistant", "reload_core_config", {})
+        print("✅ Core config reloaded")
+        time.sleep(1)
+        ha_call_service("lovelace", "reload", {})
+        print("✅ Lovelace reloaded")
+    except Exception as e:
+        print(f"⚠️ Reload warning: {e}")
+
+    return jsonify({
+        "success": True,
+        "filename": fn,
+        "register": reg_msg,
+        "message": "Dashboard aangemaakt. Herlaad je browser als het niet meteen verschijnt."
+    }), 200
+
+
+# ✅ Fix 5: create dashboards supports dashboard_type (+ edit_mode accepted)
+@app.route("/api/create_dashboards", methods=["POST"])
+def api_create_dashboards():
+    ok, msg = conn.probe(force=True)
+    if not ok:
+        return jsonify({"success": False, "error": msg}), 400
+
+    data = request.json or {}
+    base_title = (data.get("base_title") or "").strip()
+    dashboard_type = (data.get("dashboard_type") or "area_based").strip()
+    edit_mode = (data.get("edit_mode") or "editable").strip()
+
+    if not base_title:
+        return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
+
+    editable = (edit_mode in ["editable", "hybrid"])
+
+    # Build dashboard
+    if dashboard_type == "area_based":
+        dash = build_area_based_dashboard(base_title)
+    elif dashboard_type == "type_based":
+        dash = build_dashboard_yaml(base_title)  # currently same as area-based per Fix 3
+    else:
+        dash = build_simple_single_page_dashboard(base_title)
+
+    code = safe_yaml_dump(dash)
+    dashboard_key = sanitize_filename(base_title).replace("_", "-")
+
+    # In this implementation we always create YAML file (reliable)
+    fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(base_title)}.yaml")
+    write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
+
+    reg_msg = register_dashboard_in_lovelace(fn, base_title, editable=editable)
+
+    # Storage import is placeholder (kept for compatibility with your UI)
+    import_ok, import_msg = (False, "YAML file created")
+    if editable:
+        import_ok, import_msg = import_dashboard_to_storage(dashboard_key, code)
+
+    try:
+        ha_call_service("homeassistant", "reload_core_config", {})
+        time.sleep(2)
+        ha_call_service("lovelace", "reload", {})
+    except Exception as e:
+        print(f"⚠️ Reload warning: {e}")
+
+    return jsonify({
+        "success": True,
+        "dashboard_key": dashboard_key,
+        "filename": fn,
+        "title": base_title,
+        "type": dashboard_type,
+        "editable": editable and import_ok,
+        "register": reg_msg,
+        "import": import_msg,
+        "message": f"Dashboard '{base_title}' aangemaakt! ({len(dash.get('views', []))} pagina's)"
+    }), 200
+
+
+@app.route("/api/dashboards", methods=["GET"])
+def api_list_dashboards():
+    files = list_yaml_files(DASHBOARDS_PATH)
+    items = [{"name": Path(f).stem, "filename": f} for f in files]
+    return jsonify(items), 200
+
+
+@app.route("/api/download", methods=["GET"])
+def api_download():
+    filename = (request.args.get("filename") or "").strip()
+    if not filename:
+        return jsonify({"error": "filename ontbreekt"}), 400
+
+    safe = os.path.basename(filename)
+    path = os.path.join(DASHBOARDS_PATH, safe)
+    if not os.path.exists(path):
+        return jsonify({"error": "bestand niet gevonden"}), 404
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return Response(content, mimetype="text/plain; charset=utf-8")
+
+
+@app.route("/api/delete_dashboard", methods=["POST"])
+def api_delete_dashboard():
+    data = request.json or {}
+    filename = (data.get("filename") or "").strip()
+    if not filename:
+        return jsonify({"error": "filename ontbreekt"}), 400
+
+    safe = os.path.basename(filename)
+    path = os.path.join(DASHBOARDS_PATH, safe)
+    if not os.path.exists(path):
+        return jsonify({"error": "bestand niet gevonden"}), 404
+
+    try:
+        os.remove(path)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reload_lovelace", methods=["POST"])
+def api_reload_lovelace():
+    try:
+        ha_call_service("lovelace", "reload", {})
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# Debug endpoints
+# -----------------------------------------------------------------------------
+@app.route("/api/debug/ha", methods=["GET"])
+def api_debug_ha():
+    ok, msg = conn.probe(force=True)
+    return jsonify({
+        "ok": ok,
+        "message": msg,
+        "active": {"url": conn.active_base_url, "mode": conn.active_mode},
+        "attempts": conn.probe_attempts,
+        "token_debug": conn.token_debug,
+    }), 200
+
+
+@app.route("/api/debug/connection", methods=["GET"])
+def api_debug_connection():
+    """Uitgebreide connection debug info"""
+    ok, msg = conn.probe(force=True)
+
+    debug_data = {
+        "connection_ok": ok,
+        "connection_message": msg,
+        "active_connection": {
+            "url": conn.active_base_url,
+            "mode": conn.active_mode,
+            "has_token": bool(conn.active_token),
+            "token_length": len(conn.active_token) if conn.active_token else 0
+        },
+        "token_discovery": conn.token_debug,
+        "probe_attempts": conn.probe_attempts,
+        "environment": {
+            "SUPERVISOR_TOKEN": bool(os.environ.get(SUPERVISOR_TOKEN_ENV)),
+            "HOMEASSISTANT_TOKEN": bool(os.environ.get(HOMEASSISTANT_TOKEN_ENV)),
+            "HA_CONFIG_PATH": HA_CONFIG_PATH,
+            "ADDON_OPTIONS_PATH": ADDON_OPTIONS_PATH,
+        },
+        "options_json": _read_options_json(),
+        "urls_tried": HA_URLS,
+    }
+
+    return jsonify(debug_data), 200
+
+
+@app.route("/api/debug/dashboards", methods=["GET"])
+def api_debug_dashboards():
+    """Debug endpoint om te zien waarom dashboards niet verschijnen"""
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    debug_info = {
+        "config_yaml_exists": os.path.exists(config_yaml_path),
+        "config_yaml_path": config_yaml_path,
+        "dashboards_path": DASHBOARDS_PATH,
+        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
+    }
+
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            debug_info["config_yaml_content"] = config
+            debug_info["lovelace_config"] = config.get("lovelace", {})
+        except Exception as e:
+            debug_info["config_yaml_error"] = str(e)
+
+    try:
+        files = list_yaml_files(DASHBOARDS_PATH)
+        debug_info["dashboard_files"] = files
+        debug_info["dashboard_files_count"] = len(files)
+    except Exception as e:
+        debug_info["dashboard_files_error"] = str(e)
+
+    try:
+        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
+        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
+    except Exception as e:
+        debug_info["permissions_error"] = str(e)
+
+    return jsonify(debug_info), 200
+
+
+@app.route("/api/debug/config_yaml", methods=["GET"])
+def api_debug_config_yaml():
+    """Debug configuration.yaml structuur"""
+    valid, msg, details = validate_configuration_yaml()
+
+    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
+
+    preview = None
+    if os.path.exists(config_yaml_path):
+        try:
+            with open(config_yaml_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                preview = "".join(lines[:50])
+                if len(lines) > 50:
+                    preview += f"\n... ({len(lines) - 50} more lines)"
+        except Exception as e:
+            preview = f"Error reading: {e}"
+
+    return jsonify({
+        "valid": valid,
+        "message": msg,
+        "details": details,
+        "path": config_yaml_path,
+        "preview": preview
+    }), 200
+
+
+# -----------------------------------------------------------------------------
+# HTML UI (with requested dashboard type select + JS createMine update)
+# -----------------------------------------------------------------------------
+HTML_PAGE = """<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
@@ -1202,6 +1515,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
             <button onclick="reloadDashboards()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔄 Vernieuwen</button>
             <button onclick="openDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🧾 Debug</button>
             <button onclick="openDashboardDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔍 Dashboard Check</button>
+            <button onclick="openConnectionDebug()" class="text-sm bg-white border border-gray-300 px-3 py-1 rounded-lg hover:bg-gray-100">🔍 Verbinding Test</button>
           </div>
         </div>
       </div>
@@ -1235,7 +1549,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
               <option value="emerald_fresh">Emerald Fresh</option>
               <option value="amber_warm">Amber Warm</option>
               <option value="rose_neon">Rose Neon</option>
-              <option value="midnight_pro">Midnight Pro</option>
             </select>
           </div>
 
@@ -1270,6 +1583,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <div class="text-sm text-slate-500 flex items-center"><span id="setupHint">Klik één keer. Wij doen de rest.</span></div>
         </div>
 
+        <!-- ✅ Advanced options / lovelace init -->
         <div class="mt-3 text-sm text-slate-500">
           <details class="cursor-pointer">
             <summary class="font-semibold hover:text-slate-700">⚙️ Geavanceerde opties</summary>
@@ -1303,25 +1617,38 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <div id="step3" class="border border-slate-200 rounded-2xl p-5 mt-4 opacity-50 pointer-events-none">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h2 class="text-xl font-bold text-slate-900">Stap 3 — Maak jouw dashboards</h2>
-            <p class="text-slate-600 mt-1">Geef een naam. Wij maken 2 dashboards: <b>Simpel</b> & <b>Uitgebreid</b>.</p>
+            <h2 class="text-xl font-bold text-slate-900">Stap 3 — Maak jouw dashboard</h2>
+            <p class="text-slate-600 mt-1">Kies type + naam. Wij maken een dashboard met pagina’s.</p>
           </div>
           <div class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700">Nieuw</div>
         </div>
 
+        <!-- ✅ Fix 4: UI Update met dashboard type -->
         <div class="mt-4">
-          <label class="block text-base font-semibold text-gray-700 mb-2">Naam</label>
-          <input type="text" id="dashName" placeholder="bijv. Thuis"
-                 class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
-
-          <div class="mt-3 flex flex-col sm:flex-row gap-3">
-            <button onclick="createMine()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
-              🎨 Maak mijn dashboards
-            </button>
-            <button onclick="toggleAdvanced()" class="w-full sm:w-auto bg-white border border-gray-300 text-gray-800 py-3 px-4 rounded-xl text-lg font-semibold hover:bg-gray-100 shadow-lg">
-              🔧 Bekijk techniek (optioneel)
-            </button>
+          <label class="block text-base font-semibold text-gray-700 mb-2">Dashboard Type</label>
+          <select id="dashboardType" class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
+            <option value="area_based">📍 Per Ruimte (Home + Woonkamer + Slaapkamer...)</option>
+            <option value="type_based">🔧 Per Type (Verlichting + Klimaat + Media...)</option>
+            <option value="simple">📊 Simpel (Alles op 1 pagina)</option>
+          </select>
+          <div class="text-xs text-slate-500 mt-1">
+            <span id="dashboardTypeHelp">Multi-page dashboard met Home overzicht + per ruimte details</span>
           </div>
+        </div>
+
+        <div class="mt-4">
+          <label class="block text-base font-semibold text-gray-700 mb-2">Naam Dashboard</label>
+          <input type="text" id="dashName" placeholder="bijv. Mijn Thuis"
+                 class="w-full px-4 py-3 text-lg border-2 border-gray-300 rounded-xl focus:border-indigo-500 focus:outline-none">
+        </div>
+
+        <div class="mt-3 flex flex-col sm:flex-row gap-3">
+          <button onclick="createMine()" class="w-full sm:w-auto bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 px-4 rounded-xl text-lg font-semibold hover:from-indigo-700 hover:to-purple-700 shadow-lg">
+            🎨 Maak mijn dashboard
+          </button>
+          <button onclick="toggleAdvanced()" class="w-full sm:w-auto bg-white border border-gray-300 text-gray-800 py-3 px-4 rounded-xl text-lg font-semibold hover:bg-gray-100 shadow-lg">
+            🔧 Bekijk techniek (optioneel)
+          </button>
         </div>
 
         <div id="advancedPanel" class="hidden mt-4 bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -1363,7 +1690,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   </div>
 
 <script>
-  const API_BASE = '';
+  var API_BASE = '';
 
   function setStatus(text, color) {
     color = color || 'gray';
@@ -1400,10 +1727,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
     el.className = 'text-sm mt-1 ' + (ok ? 'text-green-700' : 'text-red-700');
   }
 
+  // ✅ Fix: dashboard type help
+  document.getElementById('dashboardType').addEventListener('change', function(e) {
+    var help = document.getElementById('dashboardTypeHelp');
+    var type = e.target.value;
+
+    if (type === 'area_based') {
+      help.textContent = 'Multi-page dashboard met Home overzicht + per ruimte details';
+    } else if (type === 'type_based') {
+      help.textContent = 'Gegroepeerd per device type: Lampen, Klimaat, Schakelaars, etc.';
+    } else if (type === 'simple') {
+      help.textContent = 'Alles op één pagina, perfect voor beginners';
+    }
+  });
+
+  // ✅ Fix 7: UI init() with better error display
   async function init() {
     setStatus('Verbinden…', 'yellow');
     try {
-      var cfgRes = await fetch('/api/config');
+      var cfgRes = await fetch(API_BASE + '/api/config');
       var cfg = await cfgRes.json();
 
       if (cfg.ha_ok) {
@@ -1411,7 +1753,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
         setCheck('chkEngine', true, 'OK');
       } else {
         setStatus('Geen verbinding', 'red');
-        setCheck('chkEngine', false, cfg.ha_message || 'Geen verbinding');
+
+        var errorMsg = cfg.ha_message || 'Geen verbinding';
+        if (errorMsg.length > 100) {
+          errorMsg = errorMsg.substring(0, 100) + '...';
+        }
+
+        setCheck('chkEngine', false, errorMsg);
+
+        console.error('Connection failed:', cfg.ha_message);
+        if (cfg.detailed_errors) console.error('Detailed errors:', cfg.detailed_errors);
+        if (cfg.probe_attempts) console.error('Probe attempts:', cfg.probe_attempts);
       }
 
       setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
@@ -1419,36 +1771,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       setDot('step1', true);
     } catch (e) {
-      console.error(e);
+      console.error('Init error:', e);
       setStatus('Verbinding mislukt', 'red');
-      setCheck('chkEngine', false, 'Kan niet verbinden: ' + (e.message || ''));
+      setCheck('chkEngine', false, 'Kan niet verbinden: ' + e.message);
       setCheck('chkCards', false, 'Kan niet verbinden');
       setCheck('chkStyle', false, 'Kan niet verbinden');
-    }
-  }
-
-  async function initLovelace() {
-    if (!confirm('Dit voegt de lovelace configuratie toe aan configuration.yaml.\n\nEr wordt automatisch een backup gemaakt.\n\nDoorgaan?')) {
-      return;
-    }
-
-    try {
-      setStatus('Lovelace initialiseren...', 'yellow');
-      var res = await fetch('/api/init_lovelace', { method: 'POST' });
-      var data = await res.json();
-
-      if (!res.ok || !data.success) {
-        alert('❌ Initialisatie mislukt: ' + (data.error || 'Onbekend'));
-        setStatus('Initialisatie mislukt', 'red');
-        return;
-      }
-
-      setStatus('Lovelace geïnitialiseerd', 'green');
-      alert('✅ Lovelace configuratie toegevoegd!\n\n' + data.message + '\n\nPad: ' + data.config_path);
-    } catch (e) {
-      console.error(e);
-      setStatus('Initialisatie mislukt', 'red');
-      alert('❌ Initialisatie mislukt.');
     }
   }
 
@@ -1461,14 +1788,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
     setCheck('chkStyle', true, 'Bezig…');
 
     try {
-      var res = await fetch('/api/setup', {
+      var res = await fetch(API_BASE + '/api/setup', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ preset: preset, density: density })
       });
 
       var data = await res.json();
-
       if (!res.ok || !data.ok) {
         document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
         alert('❌ Instellen mislukt: ' + (data.error || 'Onbekend'));
@@ -1484,18 +1810,42 @@ HTML_PAGE = r"""<!DOCTYPE html>
       setDot('step2', true);
       setDot('step3', true);
 
-      alert('✅ Setup klaar!\n\n' + (data.steps ? data.steps.join('\n') : ''));
+      alert('✅ Setup klaar!\\n\\n' + (data.steps ? data.steps.join('\\n') : ''));
+    } catch (e) {
+      document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
+      alert('❌ Instellen mislukt: ' + e.message);
+    }
+  }
+
+  async function initLovelace() {
+    if (!confirm('Dit voegt de lovelace configuratie toe aan configuration.yaml.\\n\\nEr wordt automatisch een backup gemaakt.\\n\\nDoorgaan?')) {
+      return;
+    }
+
+    try {
+      setStatus('Lovelace initialiseren...', 'yellow');
+      var res = await fetch(API_BASE + '/api/init_lovelace', { method: 'POST' });
+      var data = await res.json();
+
+      if (!res.ok || !data.success) {
+        alert('❌ Initialisatie mislukt: ' + (data.error || 'Onbekend'));
+        setStatus('Initialisatie mislukt', 'red');
+        return;
+      }
+
+      setStatus('Lovelace geïnitialiseerd', 'green');
+      alert('✅ Lovelace configuratie toegevoegd!\\n\\n' + data.message + '\\n\\nPad: ' + data.config_path);
     } catch (e) {
       console.error(e);
-      document.getElementById('setupHint').textContent = 'Dit lukte niet. Probeer opnieuw.';
-      alert('❌ Instellen mislukt: ' + (e.message || ''));
+      setStatus('Initialisatie mislukt', 'red');
+      alert('❌ Initialisatie mislukt.');
     }
   }
 
   async function createDemo() {
     try {
       setStatus('Demo maken...', 'yellow');
-      var res = await fetch('/api/create_demo', { method: 'POST' });
+      var res = await fetch(API_BASE + '/api/create_demo', { method: 'POST' });
       var data = await res.json();
       if (!res.ok || !data.success) {
         alert('❌ Demo mislukt: ' + (data.error || 'Onbekend'));
@@ -1504,14 +1854,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
       setStatus('Demo gereed!', 'green');
 
-      var msg = '✅ Demo dashboard aangemaakt!\n\n';
-      msg += '📁 Bestand: ' + data.filename + '\n';
-      msg += '📌 Titel: WOW Demo Dashboard\n\n';
-      msg += '🔄 BELANGRIJK:\n';
-      msg += '1. Wacht 5 seconden\n';
-      msg += '2. Druk op F5 (of refresh je browser)\n';
-      msg += '3. Check je sidebar voor het nieuwe dashboard\n\n';
-      msg += '💡 Zie je het niet? Gebruik "Dashboard Check" of /api/debug/dashboards';
+      var msg = '✅ Demo dashboard aangemaakt!\\n\\n';
+      msg += '📁 Bestand: ' + data.filename + '\\n';
+      msg += '📌 Titel: WOW Demo Dashboard\\n\\n';
+      msg += '🔄 BELANGRIJK:\\n';
+      msg += '1. Wacht 5 seconden\\n';
+      msg += '2. Druk op F5 (of refresh je browser)\\n';
+      msg += '3. Check je sidebar voor het nieuwe dashboard\\n\\n';
+      msg += '💡 Zie je het niet? Klik rechtsboven op “Dashboard Check”.';
 
       alert(msg);
       showStep4();
@@ -1522,6 +1872,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
   }
 
+  // ✅ Fix 7: Update JavaScript createMine (dashboardType + editMode accepted)
   async function createMine() {
     var base_title = document.getElementById('dashName').value.trim();
     if (!base_title) {
@@ -1530,12 +1881,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     try {
-      setStatus('Dashboards maken...', 'yellow');
-      var res = await fetch('/api/create_dashboards', {
+      setStatus('Dashboard maken...', 'yellow');
+
+      var dashboardType = document.getElementById('dashboardType') ? document.getElementById('dashboardType').value : 'area_based';
+      var editMode = document.getElementById('editMode') ? document.getElementById('editMode').value : 'editable';
+
+      var res = await fetch(API_BASE + '/api/create_dashboards', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ base_title: base_title })
+        body: JSON.stringify({
+          base_title: base_title,
+          dashboard_type: dashboardType,
+          edit_mode: editMode
+        })
       });
+
       var data = await res.json();
       if (!res.ok || !data.success) {
         alert('❌ Maken mislukt: ' + (data.error || 'Onbekend'));
@@ -1545,22 +1905,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       var adv = document.getElementById('advancedPanel');
       if (!adv.classList.contains('hidden')) {
-        document.getElementById('advancedOut').textContent =
-          (data.simple_code || '') + '\n---\n' + (data.advanced_code || '');
+        document.getElementById('advancedOut').textContent = (data.filename || '') + '\\n---\\n' + (data.message || '');
       }
 
-      setStatus('Dashboards gereed!', 'green');
+      setStatus('Dashboard gereed!', 'green');
 
-      var msg = '✅ Dashboards aangemaakt!\n\n';
-      msg += '📁 Basis: ' + data.simple_filename + '\n';
-      msg += '📁 Compleet: ' + data.advanced_filename + '\n\n';
-      msg += '🔄 BELANGRIJK:\n';
-      msg += '1. Wacht 5 seconden\n';
-      msg += '2. Druk op F5 (of refresh je browser)\n';
-      msg += '3. Check je sidebar voor de nieuwe dashboards\n\n';
-      msg += '💡 Zie je ze niet?\n';
-      msg += '- Ga naar Instellingen > Dashboards\n';
-      msg += '- Of gebruik de debug knop rechtsboven';
+      var msg = '✅ Dashboard aangemaakt!\\n\\n';
+      msg += '📁 ' + data.title + '\\n';
+      msg += '📄 Type: ' + data.type + '\\n';
+      msg += '📑 Pagina\\'s: ' + (data.message.match(/\\d+/)?.[0] || '?') + '\\n';
+      if (data.editable) msg += '✏️ Bewerkbaar via UI!\\n';
+      msg += '\\n🔄 Ververs je browser (F5) en check de sidebar!\\n';
 
       alert(msg);
       showStep4();
@@ -1573,7 +1928,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function reloadDashboards() {
     try {
-      await fetch('/api/reload_lovelace', { method: 'POST' });
+      await fetch(API_BASE + '/api/reload_lovelace', { method: 'POST' });
       alert('🔄 Dashboard reload gestart!');
     } catch (e) {
       console.error(e);
@@ -1592,7 +1947,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   async function loadDashboards() {
-    var response = await fetch('/api/dashboards');
+    var response = await fetch(API_BASE + '/api/dashboards');
     var items = await response.json();
 
     var list = document.getElementById('dashboardsList');
@@ -1616,8 +1971,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       html += '<div><div class="font-semibold">' + esc(t.name) + '</div>';
       html += '<div class="text-sm text-slate-500 font-mono">' + esc(t.filename) + '</div></div>';
       html += '<div class="flex gap-2 flex-wrap">';
-      html += '<button onclick="downloadDashboard(\'' + t.filename + '\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
-      html += '<button onclick="deleteDashboard(\'' + t.filename + '\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
+      html += '<button onclick="downloadDashboard(\\'' + t.filename + '\\')" class="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-100">⬇️ Download</button>';
+      html += '<button onclick="deleteDashboard(\\'' + t.filename + '\\')" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600">🗑️ Verwijder</button>';
       html += '</div></div>';
     });
 
@@ -1627,7 +1982,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   async function deleteDashboard(filename) {
     if (!confirm('Weet je zeker dat je dit dashboard wilt verwijderen?')) return;
-    var response = await fetch('/api/delete_dashboard', {
+    var response = await fetch(API_BASE + '/api/delete_dashboard', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: filename })
@@ -1642,33 +1997,34 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   async function downloadDashboard(filename) {
-    window.open('/api/download?filename=' + encodeURIComponent(filename), '_blank');
+    window.open(API_BASE + '/api/download?filename=' + encodeURIComponent(filename), '_blank');
   }
 
   async function openDebug() {
-    var res = await fetch('/api/debug/ha');
+    var res = await fetch(API_BASE + '/api/debug/ha');
     var data = await res.json();
+    console.log('Debug data:', data);
     alert(JSON.stringify(data, null, 2));
   }
 
   async function openDashboardDebug() {
     try {
-      var res = await fetch('/api/debug/dashboards');
+      var res = await fetch(API_BASE + '/api/debug/dashboards');
       var data = await res.json();
 
-      var msg = '🔍 Dashboard Debug Info\n\n';
-      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\n';
-      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\n';
-      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\n\n';
+      var msg = '🔍 Dashboard Debug Info\\n\\n';
+      msg += '📁 Dashboards folder: ' + (data.dashboards_path_exists ? '✓ Exists' : '✗ Missing') + '\\n';
+      msg += '📄 Config.yaml: ' + (data.config_yaml_exists ? '✓ Exists' : '✗ Missing') + '\\n';
+      msg += '📝 Dashboard files: ' + (data.dashboard_files_count || 0) + '\\n\\n';
 
       if (data.lovelace_config) {
-        msg += '⚙️ Lovelace config:\n';
-        msg += JSON.stringify(data.lovelace_config, null, 2) + '\n\n';
+        msg += '⚙️ Lovelace config:\\n';
+        msg += JSON.stringify(data.lovelace_config, null, 2) + '\\n\\n';
       }
 
       if (data.dashboard_files && data.dashboard_files.length > 0) {
-        msg += '📋 Found dashboards:\n';
-        data.dashboard_files.forEach(function(f){ msg += '  - ' + f + '\n'; });
+        msg += '📋 Found dashboards:\\n';
+        data.dashboard_files.forEach(f => msg += '  - ' + f + '\\n');
       }
 
       alert(msg);
@@ -1676,6 +2032,38 @@ HTML_PAGE = r"""<!DOCTYPE html>
     } catch (e) {
       console.error(e);
       alert('❌ Debug check failed');
+    }
+  }
+
+  async function openConnectionDebug() {
+    try {
+      setStatus('Verbinding testen...', 'yellow');
+      var res = await fetch(API_BASE + '/api/debug/connection');
+      var data = await res.json();
+
+      console.log('Full connection debug:', data);
+
+      var msg = '🔍 Verbinding Debug\\n\\n';
+      msg += 'Status: ' + (data.connection_ok ? '✅ OK' : '❌ FAILED') + '\\n';
+      msg += 'Mode: ' + (data.active_connection.mode || 'none') + '\\n';
+      msg += 'URL: ' + (data.active_connection.url || 'none') + '\\n\\n';
+
+      if (!data.connection_ok && data.probe_attempts) {
+        msg += 'Pogingen:\\n';
+        data.probe_attempts.forEach(function(att, i) {
+          msg += (i+1) + '. ' + att.mode + ' @ ' + att.url + '\\n';
+          msg += '   Error: ' + (att.error || 'unknown') + '\\n';
+          if (att.status_code) msg += '   HTTP: ' + att.status_code + '\\n';
+        });
+      }
+
+      msg += '\\n💡 Check browser console voor volledige details';
+
+      alert(msg);
+      setStatus(data.connection_ok ? 'Verbonden' : 'Geen verbinding', data.connection_ok ? 'green' : 'red');
+    } catch (e) {
+      console.error(e);
+      alert('❌ Debug check mislukt: ' + e.message);
     }
   }
 
@@ -1693,379 +2081,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
 </html>
 """
 
-@app.route("/")
-def index():
-    html = HTML_PAGE.replace("__APP_NAME__", APP_NAME).replace("__APP_VERSION__", APP_VERSION)
-    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
-# -------------------------
-# API
-# -------------------------
-@app.route("/api/config", methods=["GET"])
-def api_config():
-    ok, msg = conn.probe(force=False)
-    return jsonify({
-        "app_name": APP_NAME,
-        "app_version": APP_VERSION,
-        "ha_ok": bool(ok),
-        "ha_message": msg,
-        "active_mode": conn.active_mode,
-        "active_base_url": conn.active_base_url,
-        "dashboards_path": DASHBOARDS_PATH,
-        "server_time": datetime.now().isoformat(timespec="seconds"),
-        "mushroom_installed": mushroom_installed(),
-        "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
-        "options_json_found": os.path.exists(ADDON_OPTIONS_PATH),
-        "options_json_path": ADDON_OPTIONS_PATH,
-        "token_debug": conn.token_debug,
-    })
-
-@app.route("/api/debug/ha", methods=["GET"])
-def api_debug_ha():
-    info = {
-        "active_base_url": conn.active_base_url,
-        "active_mode": conn.active_mode,
-        "user_token_present": bool(conn.user_token),
-        "supervisor_token_present": bool(conn.supervisor_token),
-        "options_json_path": ADDON_OPTIONS_PATH,
-        "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
-        "token_debug": conn.token_debug,
-        "probe_attempts": conn.probe_attempts,
-        "last_probe": conn.last_probe,
-    }
-
-    try:
-        ok, msg = conn.probe(force=True)
-        info["probe_ok"] = ok
-        info["probe_message"] = msg
-
-        if ok:
-            r = conn.request("GET", "/api/", timeout=10)
-            return jsonify({
-                "ok": (r.status_code == 200),
-                "status": r.status_code,
-                "body": r.text[:400],
-                "info": info,
-            }), 200
-
-        return jsonify({"ok": False, "error": msg, "info": info}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "info": info}), 200
-
-@app.route("/api/debug/tokens", methods=["GET"])
-def api_debug_tokens():
-    return jsonify({
-        "options_json_path": ADDON_OPTIONS_PATH,
-        "options_json_exists": os.path.exists(ADDON_OPTIONS_PATH),
-        "options_json_content": _read_options_json(),
-        "env_vars": {
-            "HOMEASSISTANT_TOKEN": bool(os.environ.get("HOMEASSISTANT_TOKEN")),
-            "SUPERVISOR_TOKEN": bool(os.environ.get("SUPERVISOR_TOKEN")),
-            "HA_CONFIG_PATH": HA_CONFIG_PATH,
-        },
-        "discovered_tokens": TOKEN_DEBUG,
-        "active_connection": {
-            "url": conn.active_base_url,
-            "mode": conn.active_mode,
-            "has_token": bool(conn.active_token),
-        }
-    })
-
-@app.route("/api/debug/config_yaml", methods=["GET"])
-def api_debug_config_yaml():
-    valid, msg, details = validate_configuration_yaml()
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    preview = None
-    if os.path.exists(config_yaml_path):
-        try:
-            with open(config_yaml_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                preview = "".join(lines[:50])
-                if len(lines) > 50:
-                    preview += f"\n... ({len(lines) - 50} more lines)"
-        except Exception as e:
-            preview = f"Error reading: {e}"
-
-    return jsonify({
-        "valid": valid,
-        "message": msg,
-        "details": details,
-        "path": config_yaml_path,
-        "preview": preview
-    }), 200
-
-@app.route("/api/debug/dashboards", methods=["GET"])
-def api_debug_dashboards():
-    config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-
-    debug_info: Dict[str, Any] = {
-        "config_yaml_exists": os.path.exists(config_yaml_path),
-        "config_yaml_path": config_yaml_path,
-        "dashboards_path": DASHBOARDS_PATH,
-        "dashboards_path_exists": os.path.exists(DASHBOARDS_PATH),
-    }
-
-    if os.path.exists(config_yaml_path):
-        try:
-            with open(config_yaml_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f) or {}
-            debug_info["config_yaml_content"] = config
-            debug_info["lovelace_config"] = config.get("lovelace", {})
-        except Exception as e:
-            debug_info["config_yaml_error"] = str(e)
-
-    try:
-        files = list_yaml_files(DASHBOARDS_PATH)
-        debug_info["dashboard_files"] = files
-        debug_info["dashboard_files_count"] = len(files)
-    except Exception as e:
-        debug_info["dashboard_files_error"] = str(e)
-
-    try:
-        debug_info["dashboards_writable"] = os.access(DASHBOARDS_PATH, os.W_OK)
-        debug_info["config_writable"] = os.access(config_yaml_path, os.W_OK) if os.path.exists(config_yaml_path) else False
-    except Exception as e:
-        debug_info["permissions_error"] = str(e)
-
-    return jsonify(debug_info), 200
-
-@app.route("/api/init_lovelace", methods=["POST"])
-def api_init_lovelace():
-    """Initialiseer lovelace config in configuration.yaml"""
-    try:
-        ok, msg = ensure_lovelace_config()
-        if ok:
-            ha_call_service("homeassistant", "reload_core_config", {})
-            return jsonify({
-                "success": True,
-                "message": msg,
-                "config_path": os.path.join(HA_CONFIG_PATH, "configuration.yaml")
-            }), 200
-        else:
-            return jsonify({"success": False, "error": msg}), 400
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/setup", methods=["POST"])
-def api_setup():
-    ok, msg = conn.probe(force=True)
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 400
-
-    data = request.json or {}
-    preset = (data.get("preset") or "midnight_pro").strip()
-    density = (data.get("density") or "comfy").strip()
-
-    steps: List[str] = []
-    try:
-        ok_lovelace, msg_lovelace = ensure_lovelace_config()
-        if ok_lovelace:
-            steps.append(f"✅ {msg_lovelace}")
-        else:
-            steps.append(f"⚠️ {msg_lovelace}")
-
-        steps.append(install_mushroom())
-        steps.append(ensure_mushroom_resource())
-        steps.append(install_dashboard_theme(preset, density))
-        steps.append(try_set_theme_auto())
-
-        ha_call_service("homeassistant", "reload_core_config", {})
-        steps.append("✅ Core config herladen")
-
-        time.sleep(1)
-
-        ha_call_service("lovelace", "reload", {})
-        steps.append("✅ Lovelace herladen")
-
-        return jsonify({"ok": True, "steps": steps}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
-
-@app.route("/api/create_demo", methods=["POST"])
-def api_create_demo():
-    ok, msg = conn.probe(force=True)
-    if not ok:
-        return jsonify({"success": False, "error": msg}), 400
-
-    title = "WOW Demo Dashboard"
-    dash = build_comprehensive_demo_dashboard(title)
-    code = safe_yaml_dump(dash)
-    fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(title)}.yaml")
-    write_text_file(os.path.join(DASHBOARDS_PATH, fn), code)
-
-    reg_msg = register_dashboard_in_lovelace(fn, title)
-
-    try:
-        ha_call_service("homeassistant", "reload_core_config", {})
-        print("✅ Core config reloaded")
-        time.sleep(1)
-        ha_call_service("lovelace", "reload", {})
-        print("✅ Lovelace reloaded")
-    except Exception as e:
-        print(f"⚠️ Reload warning: {e}")
-
-    return jsonify({
-        "success": True,
-        "filename": fn,
-        "register": reg_msg,
-        "message": "Dashboard aangemaakt. Herlaad je browser als het niet meteen verschijnt."
-    }), 200
-
-@app.route("/api/create_dashboards", methods=["POST"])
-def api_create_dashboards():
-    ok, msg = conn.probe(force=True)
-    if not ok:
-        return jsonify({"success": False, "error": msg}), 400
-
-    data = request.json or {}
-    base_title = (data.get("base_title") or "").strip()
-    if not base_title:
-        return jsonify({"success": False, "error": "Naam ontbreekt."}), 400
-
-    # Simple dashboard
-    simple_title = f"{base_title} - Basis"
-    states = safe_get_states()
-    simple_entities = [
-        e for e in states
-        if any((e.get("entity_id", "") or "").startswith(d) for d in ["light.", "switch.", "climate."])
-    ][:10]
-
-    simple_cards: List[Dict[str, Any]] = [{
-        "type": "custom:mushroom-title-card",
-        "title": simple_title,
-        "subtitle": "Eenvoudig overzicht"
-    }]
-
-    for ent in simple_entities:
-        eid = ent.get("entity_id", "")
-        if eid.startswith("light."):
-            simple_cards.append({
-                "type": "custom:mushroom-light-card",
-                "entity": eid,
-                "use_light_color": True
-            })
-        elif eid.startswith("climate."):
-            simple_cards.append({
-                "type": "custom:mushroom-climate-card",
-                "entity": eid
-            })
-        elif eid:
-            simple_cards.append({
-                "type": "custom:mushroom-entity-card",
-                "entity": eid
-            })
-
-    if len(simple_cards) == 1:
-        simple_cards.append({
-            "type": "markdown",
-            "content": f"# {simple_title}\n\n✅ Dashboard aangemaakt!"
-        })
-
-    simple_dash = {
-        "title": simple_title,
-        "views": [{
-            "title": "Overzicht",
-            "path": "overview",
-            "type": "sections",
-            "sections": [{"type": "grid", "cards": simple_cards}]
-        }]
-    }
-
-    # Advanced dashboard
-    adv_title = f"{base_title} - Compleet"
-    adv_dash = build_dashboard_yaml(adv_title)
-
-    simple_code = safe_yaml_dump(simple_dash)
-    adv_code = safe_yaml_dump(adv_dash)
-
-    simple_fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(simple_title)}.yaml")
-    adv_fn = next_available_filename(DASHBOARDS_PATH, f"{sanitize_filename(adv_title)}.yaml")
-
-    write_text_file(os.path.join(DASHBOARDS_PATH, simple_fn), simple_code)
-    write_text_file(os.path.join(DASHBOARDS_PATH, adv_fn), adv_code)
-
-    reg1 = register_dashboard_in_lovelace(simple_fn, simple_title)
-    reg2 = register_dashboard_in_lovelace(adv_fn, adv_title)
-
-    try:
-        ha_call_service("homeassistant", "reload_core_config", {})
-        print("✅ Core config reloaded")
-        time.sleep(1)
-        ha_call_service("lovelace", "reload", {})
-        print("✅ Lovelace reloaded")
-    except Exception as e:
-        print(f"⚠️ Reload warning: {e}")
-
-    return jsonify({
-        "success": True,
-        "simple_filename": simple_fn,
-        "advanced_filename": adv_fn,
-        "simple_code": simple_code,
-        "advanced_code": adv_code,
-        "register": [reg1, reg2],
-        "message": "Dashboards aangemaakt. Herlaad je browser als ze niet meteen verschijnen."
-    }), 200
-
-@app.route("/api/dashboards", methods=["GET"])
-def api_dashboards():
-    files = list_yaml_files(DASHBOARDS_PATH)
-    return jsonify([{"filename": fn, "name": fn.replace(".yaml", "").replace("_", " ").title()} for fn in files])
-
-@app.route("/api/download", methods=["GET"])
-def api_download():
-    filename = (request.args.get("filename", "") or "").strip()
-    if not is_safe_filename(filename):
-        return jsonify({"error": "Ongeldige filename"}), 400
-    filepath = os.path.join(DASHBOARDS_PATH, filename)
-    if not os.path.exists(filepath):
-        return jsonify({"error": "Bestand niet gevonden"}), 404
-    content = read_text_file(filepath)
-    return Response(content, mimetype="text/yaml", headers={"Content-Disposition": f"attachment; filename={filename}"})
-
-@app.route("/api/delete_dashboard", methods=["POST"])
-def api_delete_dashboard():
-    data = request.json or {}
-    filename = (data.get("filename") or "").strip()
-    if not is_safe_filename(filename):
-        return jsonify({"error": "Ongeldige filename"}), 400
-    filepath = os.path.join(DASHBOARDS_PATH, filename)
-    if os.path.exists(filepath):
-        os.remove(filepath)
-        return jsonify({"success": True})
-    return jsonify({"error": "Bestand niet gevonden"}), 404
-
-@app.route("/api/reload_lovelace", methods=["POST"])
-def api_reload_lovelace():
-    ok, msg = conn.probe(force=True)
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 400
-
-    candidates = [
-        ("homeassistant", "reload_core_config", {}),
-        ("lovelace", "reload", {}),
-    ]
-
-    last = None
-    for domain, service, payload in candidates:
-        r, status = ha_call_service(domain, service, payload)
-        if status == 200 and r.get("ok"):
-            return jsonify({"ok": True, "result": f"{domain}.{service}"}), 200
-        last = r
-
-    return jsonify({"ok": False, "error": "Vernieuwen lukt niet.", "details": last}), 400
-
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("\n" + "=" * 60)
-    print(f"{APP_NAME} starting... ({APP_VERSION})")
-    print("=" * 60)
-    print("🌐 Starting Flask with ingress support...")
-    print("=" * 60 + "\n")
-
-    app.run(
-        host="0.0.0.0",
-        port=5001,
-        debug=False,
-        threaded=True,
-        use_reloader=False
-    )
+    ensure_dir(DASHBOARDS_PATH)
+    ensure_dir(WWW_PATH)
+    ensure_dir(COMMUNITY_PATH)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8099")), debug=False)

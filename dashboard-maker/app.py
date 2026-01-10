@@ -153,7 +153,6 @@ class HAConnection:
             "Content-Type": "application/json",
         }
 
-    # Improved JSON-safe connection test
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -457,14 +456,12 @@ def install_mushroom() -> str:
     return "✅ Mushroom geïnstalleerd"
 
 
-# ✅ Fix 1: Update ensure_mushroom_resource - skip als endpoint niet bestaat
 def ensure_mushroom_resource() -> str:
     """Probeer Mushroom resource te registreren (werkt niet altijd in YAML mode)"""
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
     cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
 
     try:
-        # ✅ Test of resources endpoint bestaat
         r = conn.request("GET", "/api/lovelace/resources", timeout=12)
 
         if r.status_code == 404:
@@ -615,29 +612,6 @@ def register_dashboard_in_lovelace(filename: str, title: str) -> str:
 # -----------------------------------------------------------------------------
 # Theme
 # -----------------------------------------------------------------------------
-# ✅ Fix 4: Voeg instructies toe aan theme file voor handmatige resource config
-def install_dashboard_theme(preset: str, density: str) -> str:
-    ensure_dir(DASHBOARD_THEME_DIR)
-    content = f"""# Dashboard Maker Theme
-# ⚠️ BELANGRIJK: Voeg Mushroom resource handmatig toe in configuration.yaml:
-#
-# lovelace:
-#   mode: yaml
-#   resources:
-#     - url: /local/community/lovelace-mushroom/dist/mushroom.js
-#       type: module
-#   dashboards:
-#     # je dashboards hier
-
-dashboard_maker:
-  preset: "{preset}"
-  dashboard_density: "{density}"
-"""
-    write_text_file(DASHBOARD_THEME_FILE, content)
-    return "✅ Theme geïnstalleerd (check commentaar in theme file voor Mushroom setup)"
-
-
-# ✅ Fix 2: Update try_set_theme_auto - betere error handling
 def try_set_theme_auto() -> str:
     """Probeer theme te activeren (werkt niet altijd)"""
     try:
@@ -660,6 +634,35 @@ def try_set_theme_auto() -> str:
     except Exception as e:
         print(f"try_set_theme_auto warning: {e}")
         return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel → Themes)"
+
+
+# ✅ Fix 1: Update install_dashboard_theme - voeg resources sectie toe aan output
+def install_dashboard_theme(preset: str, density: str) -> str:
+    ensure_dir(DASHBOARD_THEME_DIR)
+
+    # Theme content
+    theme_content = f"""# Dashboard Maker Theme
+dashboard_maker:
+  preset: "{preset}"
+  dashboard_density: "{density}"
+"""
+    write_text_file(DASHBOARD_THEME_FILE, theme_content)
+
+    # ✅ Maak apart resources file dat gebruiker kan kopieren
+    resources_example = """# Kopieer deze sectie naar je configuration.yaml
+
+lovelace:
+  mode: yaml
+  resources:
+    - url: /local/community/lovelace-mushroom/dist/mushroom.js
+      type: module
+  dashboards: {}
+"""
+
+    resources_file = os.path.join(DASHBOARD_THEME_DIR, "RESOURCES_EXAMPLE.yaml")
+    write_text_file(resources_file, resources_example)
+
+    return f"✅ Theme geïnstalleerd (check {resources_file} voor resources voorbeeld)"
 
 
 # -----------------------------------------------------------------------------
@@ -927,7 +930,6 @@ def index() -> Response:
     return Response(html, mimetype="text/html")
 
 
-# ✅ Fix 3: Update api_setup - verwijder lovelace.reload call (YAML mode)
 @app.route("/api/setup", methods=["POST"])
 def api_setup():
     ok, msg = conn.probe(force=True)
@@ -949,7 +951,6 @@ def api_setup():
         steps.append(install_dashboard_theme(preset, density))
         steps.append(try_set_theme_auto())
 
-        # ✅ Alleen core config reload (lovelace.reload werkt niet in YAML mode)
         ha_call_service("homeassistant", "reload_core_config", {})
         steps.append("✅ Core config herladen")
         time.sleep(2)
@@ -962,7 +963,6 @@ def api_setup():
         return jsonify({"ok": False, "error": error_msg, "steps": steps}), 500
 
 
-# ✅ Fix 2: Update api_create_dashboards - verwijder lovelace.reload
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     ok, msg = conn.probe(force=True)
@@ -988,7 +988,6 @@ def api_create_dashboards():
     reg_msg = register_dashboard_in_lovelace(fn, base_title)
 
     try:
-        # ✅ In YAML mode: alleen core reload nodig
         ha_call_service("homeassistant", "reload_core_config", {})
         time.sleep(2)
     except Exception as e:
@@ -1004,7 +1003,6 @@ def api_create_dashboards():
     }), 200
 
 
-# ✅ Fix 3: Update api_reload_lovelace - safe reload voor YAML mode
 @app.route("/api/reload_lovelace", methods=["POST"])
 def api_reload_lovelace():
     try:
@@ -1025,7 +1023,6 @@ def api_config():
         "ha_message": msg,
         "active_mode": conn.active_mode,
         "active_base_url": conn.active_base_url,
-
         "server_time": datetime.now().isoformat(timespec="seconds"),
         "mushroom_installed": mushroom_installed(),
         "theme_file_exists": os.path.exists(DASHBOARD_THEME_FILE),
@@ -1098,6 +1095,36 @@ HTML_PAGE = """<!DOCTYPE html>
         </button>
       </div>
 
+      <!-- ✅ Fix 3: Quick Copy sectie (NA setup button, VOOR 'Maak jouw dashboard') -->
+      <div class="mt-4 bg-blue-50 border border-blue-200 rounded-xl p-4">
+        <details class="cursor-pointer">
+          <summary class="font-semibold text-blue-900 hover:text-blue-700">
+            📋 Handmatige Mushroom Setup (kopieer & plak)
+          </summary>
+          <div class="mt-3 space-y-3">
+            <p class="text-sm text-gray-700">Voeg dit toe aan <code class="bg-white px-2 py-1 rounded">/config/configuration.yaml</code>:</p>
+
+            <div class="relative">
+<pre class="bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto text-xs font-mono" id="resourcesCodeBlock">lovelace:
+  mode: yaml
+  resources:
+    - url: /local/community/lovelace-mushroom/dist/mushroom.js
+      type: module
+  dashboards: {}</pre>
+              <button onclick="copyResourcesCodeFromBlock()" class="absolute top-2 right-2 bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs font-semibold">
+                📋 Kopieer
+              </button>
+            </div>
+
+            <div class="text-xs text-gray-600 bg-yellow-50 border border-yellow-200 p-3 rounded-lg">
+              <strong>⚠️ Daarna:</strong><br>
+              • Ga naar <strong>Ontwikkelaarstools</strong> → <strong>YAML</strong> → <strong>"ALLE YAML-CONFIGURATIE HERLADEN"</strong><br>
+              • Of herstart Home Assistant
+            </div>
+          </div>
+        </details>
+      </div>
+
       <div class="mt-6 border border-slate-200 rounded-2xl p-5">
         <h2 class="text-xl font-bold text-slate-900">Maak jouw dashboard</h2>
 
@@ -1161,7 +1188,20 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
-  // ✅ Fix 5: Update HTML met duidelijkere setup instructies
+  // Help text for type select
+  document.addEventListener('DOMContentLoaded', function() {
+    var el = document.getElementById('dashboardType');
+    if (!el) return;
+    el.addEventListener('change', function(e) {
+      var help = document.getElementById('dashboardTypeHelp');
+      var type = e.target.value;
+      if (type === 'area_based') help.textContent = 'Multi-page dashboard met Home overzicht + per ruimte details';
+      else if (type === 'simple') help.textContent = 'Alles op één pagina, perfect voor beginners';
+      else help.textContent = '';
+    });
+  });
+
+  // ✅ Fix 2: Vervang runSetup + showSetupResult + copy functies
   async function runSetup() {
     try {
       setStatus('Setup...', 'yellow');
@@ -1179,19 +1219,8 @@ HTML_PAGE = """<!DOCTYPE html>
         return;
       }
 
-      var msg = '✅ Setup klaar!\\n\\n' + (r.data.steps ? r.data.steps.join('\\n') : '');
-      msg += '\\n\\n📝 HANDMATIGE STAPPEN:\\n';
-      msg += '1. Voeg Mushroom toe aan configuration.yaml:\\n\\n';
-      msg += 'lovelace:\\n';
-      msg += '  mode: yaml\\n';
-      msg += '  resources:\\n';
-      msg += '    - url: /local/community/lovelace-mushroom/dist/mushroom.js\\n';
-      msg += '      type: module\\n';
-      msg += '  dashboards: {}\\n\\n';
-      msg += '2. Herstart Home Assistant\\n';
-      msg += '3. Maak je dashboard aan';
-
-      alert(msg);
+      // ✅ Toon resultaat met kopieerbare code
+      showSetupResult(r.data.steps);
       setStatus('Setup klaar', 'green');
       init();
     } catch (e) {
@@ -1200,6 +1229,96 @@ HTML_PAGE = """<!DOCTYPE html>
       setStatus('Setup error', 'red');
     }
   }
+
+  function showSetupResult(steps) {
+    var resourcesCode = `lovelace:
+  mode: yaml
+  resources:
+    - url: /local/community/lovelace-mushroom/dist/mushroom.js
+      type: module
+  dashboards: {}`;
+
+    var html = '<div style="max-width: 600px;">';
+    html += '<h3 style="font-weight: bold; margin-bottom: 10px;">✅ Setup compleet!</h3>';
+
+    if (steps && steps.length > 0) {
+      html += '<div style="margin-bottom: 15px;">';
+      steps.forEach(function(step) {
+        html += '<div style="margin: 5px 0;">• ' + step + '</div>';
+      });
+      html += '</div>';
+    }
+
+    html += '<h4 style="font-weight: bold; margin: 15px 0 10px 0;">📝 Handmatige stap:</h4>';
+    html += '<p style="margin-bottom: 10px;">Voeg dit toe aan configuration.yaml:</p>';
+
+    html += '<div style="position: relative;">';
+    html += '<pre style="background: #1e293b; color: #10b981; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 13px; font-family: monospace; margin: 0;">' + resourcesCode + '</pre>';
+    html += '<button onclick="copyResourcesCode()" style="position: absolute; top: 10px; right: 10px; background: #3b82f6; color: white; padding: 5px 10px; border: none; border-radius: 5px; cursor: pointer; font-size: 12px;">📋 Kopieer</button>';
+    html += '</div>';
+
+    html += '<div style="margin-top: 15px; padding: 10px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 5px;">';
+    html += '<strong>⚠️ Belangrijk:</strong><br>';
+    html += '1. Plak bovenstaande code in <code>/config/configuration.yaml</code><br>';
+    html += '2. Ga naar Ontwikkelaarstools → YAML → "ALLE YAML-CONFIGURATIE HERLADEN"<br>';
+    html += '3. Of herstart Home Assistant<br>';
+    html += '4. Maak daarna je dashboard aan';
+    html += '</div>';
+
+    html += '</div>';
+
+    // Fallback modal
+    var modal = document.createElement('div');
+    modal.innerHTML =
+      '<div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 9999; display: flex; align-items: center; justify-content: center;" onclick="this.remove()">' +
+      '<div style="background: white; padding: 30px; border-radius: 15px; max-width: 90%; max-height: 90%; overflow-y: auto;" onclick="event.stopPropagation()">' +
+      html +
+      '<button onclick="this.closest(\\'div[style*=fixed]\\').remove()" style="margin-top: 20px; background: #4f46e5; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">Sluiten</button>' +
+      '</div></div>';
+    document.body.appendChild(modal);
+  }
+
+  window.copyResourcesCode = function() {
+    var code = `lovelace:
+  mode: yaml
+  resources:
+    - url: /local/community/lovelace-mushroom/dist/mushroom.js
+      type: module
+  dashboards: {}`;
+
+    navigator.clipboard.writeText(code).then(function() {
+      alert('📋 Gekopieerd naar klembord!');
+    }).catch(function() {
+      var textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      alert('📋 Gekopieerd naar klembord!');
+    });
+  };
+
+  // ✅ Fix 3: copy from quick block
+  function copyResourcesCodeFromBlock() {
+    var code = document.getElementById('resourcesCodeBlock').textContent;
+    navigator.clipboard.writeText(code).then(function() {
+      alert('📋 Gekopieerd! Plak in /config/configuration.yaml');
+    }).catch(function() {
+      var textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      alert('📋 Gekopieerd! Plak in /config/configuration.yaml');
+    });
+  }
+  window.copyResourcesCodeFromBlock = copyResourcesCodeFromBlock;
 
   async function createMine() {
     var base_title = document.getElementById('dashName').value.trim();
@@ -1253,10 +1372,8 @@ HTML_PAGE = """<!DOCTYPE html>
         setCheck('chkEngine', true, 'OK');
       } else {
         setStatus('Geen verbinding', 'red');
-
         var errorMsg = cfg.ha_message || 'Geen verbinding';
         if (errorMsg.length > 100) errorMsg = errorMsg.substring(0, 100) + '...';
-
         setCheck('chkEngine', false, errorMsg);
 
         console.error('Connection failed:', cfg.ha_message);

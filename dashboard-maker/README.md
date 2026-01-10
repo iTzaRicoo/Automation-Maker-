@@ -137,7 +137,6 @@ Status: Stable
 - Home Assistant Core
 - Mushroom Cards
 - Community testers
-- Iedereen die YAML boven UI verkiest 😉
 
 📄 Licentie
 MIT License

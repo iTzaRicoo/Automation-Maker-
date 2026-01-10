@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 import zipfile
 import io
-import json  # ✅ Ensure json is imported
+import json
 import time
 import urllib3
 
@@ -40,11 +40,11 @@ THEMES_PATH = os.path.join(HA_CONFIG_PATH, "themes")
 DASHBOARD_THEME_DIR = os.path.join(THEMES_PATH, "dashboard_maker")
 DASHBOARD_THEME_FILE = os.path.join(DASHBOARD_THEME_DIR, "dashboard_maker.yaml")
 
-ADDON_OPTIONS_PATH = "/data/options.json"  # HA add-on options
+ADDON_OPTIONS_PATH = "/data/options.json"
+
 SUPERVISOR_TOKEN_ENV = "SUPERVISOR_TOKEN"
 HOMEASSISTANT_TOKEN_ENV = "HOMEASSISTANT_TOKEN"
 
-# Prefer supervisor when available; fall back to local HA.
 HA_URLS = [
     "http://supervisor/core",
     "http://homeassistant:8123",
@@ -153,7 +153,7 @@ class HAConnection:
             "Content-Type": "application/json",
         }
 
-    # ✅ Fix 1: Verbeterde _test_connection met JSON validation
+    # Improved JSON-safe connection test
     def _test_connection(self, url: str, token: Optional[str], mode: str) -> Tuple[bool, str, Dict[str, Any]]:
         debug = {
             "url": url,
@@ -181,14 +181,12 @@ class HAConnection:
 
             if r.status_code == 200:
                 try:
-                    # ✅ Check of response JSON is
                     content_type = r.headers.get("Content-Type", "")
                     if "application/json" not in content_type:
                         debug["error"] = f"Response is geen JSON (Content-Type: {content_type})"
                         debug["response_text"] = r.text[:500]
                         return False, "Geen JSON response", debug
 
-                    # ✅ Probeer JSON te parsen
                     data = r.json()
                     debug["response_message"] = (data or {}).get("message", "")
                     debug["response_data"] = str(data)[:200]
@@ -198,15 +196,11 @@ class HAConnection:
                     debug["json_error"] = str(e)
                     debug["response_text"] = r.text[:500]
                     debug["error"] = f"JSON parse error: {str(e)}"
-
-                    # ✅ Check of het HTML is (login page)
                     if r.text.strip().startswith("<"):
                         debug["error"] = "Response is HTML (mogelijk login page)"
                         return False, "HTML response (login page?)", debug
-
                     return False, f"Ongeldige JSON: {str(e)[:50]}", debug
 
-            # Auth errors
             if r.status_code == 401:
                 debug["error"] = "Unauthorized - token werkt niet"
                 debug["response_text"] = r.text[:300]
@@ -217,7 +211,6 @@ class HAConnection:
                 debug["response_text"] = r.text[:300]
                 return False, "Geen toegang (403)", debug
 
-            # Andere HTTP errors
             debug["error"] = f"HTTP {r.status_code}"
             debug["response_text"] = r.text[:300]
             return False, f"HTTP {r.status_code}", debug
@@ -232,7 +225,6 @@ class HAConnection:
             debug["error"] = f"Exception: {str(e)[:200]}"
             return False, str(e)[:100], debug
 
-    # ✅ Fix 2: Verbeterde probe met betere error reporting
     def probe(self, force: bool = False) -> Tuple[bool, str]:
         if self.active_base_url and self.active_token and not force:
             return True, f"cached:{self.active_mode}"
@@ -242,13 +234,10 @@ class HAConnection:
 
         attempts: List[Tuple[str, str, str]] = []
 
-        # Probeer user token eerst
         if self.user_token:
             for url in HA_URLS:
-                mode = "user_token"
-                attempts.append((url, self.user_token, mode))
+                attempts.append((url, self.user_token, "user_token"))
 
-        # Probeer supervisor token
         if self.supervisor_token:
             for url in HA_URLS:
                 if "supervisor" in url:
@@ -288,7 +277,6 @@ class HAConnection:
                 print(f"  ✅ Connected via: {mode} at {url}\n")
                 return True, f"OK via {mode}"
 
-        # Alle pogingen gefaald
         error_msg = "❌ Alle verbindingen gefaald!\n\n"
         error_msg += "Geprobeerde verbindingen:\n"
         for err in all_errors[:5]:
@@ -310,7 +298,6 @@ class HAConnection:
         print(error_msg)
         return False, error_msg
 
-    # ✅ Fix 3: Verbeterde request methode met response validation
     def request(self, method: str, path: str, json_body: dict | None = None, timeout: int = 15) -> requests.Response:
         ok, _ = self.probe(force=False)
         if not ok or not self.active_base_url:
@@ -333,16 +320,13 @@ class HAConnection:
                 verify=False
             )
 
-            # ✅ Log response details
             content_type = r.headers.get("Content-Type", "unknown")
             print(f"📡 {method} {path} → {r.status_code} ({content_type})")
 
-            # ✅ Check voor HTML response (betekent meestal auth probleem)
             if r.status_code == 200 and "text/html" in content_type:
                 print("⚠️ WARNING: Got HTML response instead of JSON")
                 print(f"   Response preview: {r.text[:200]}")
 
-            # Auth errors - re-probe
             if r.status_code in (401, 403):
                 print("⚠️ Auth error, re-probing...")
                 self.active_base_url = None
@@ -413,16 +397,6 @@ def ha_call_service(domain: str, service: str, data: Dict[str, Any]) -> Dict[str
         return {"ok": True}
 
 
-def get_lovelace_resources() -> List[Dict[str, Any]]:
-    try:
-        r = conn.request("GET", "/api/lovelace/resources", timeout=20)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"get_lovelace_resources error: {e}")
-    return []
-
-
 # -----------------------------------------------------------------------------
 # Mushroom install / resource
 # -----------------------------------------------------------------------------
@@ -432,7 +406,6 @@ def mushroom_installed() -> bool:
         os.path.join(MUSHROOM_PATH, "build"),
         MUSHROOM_PATH
     ]
-
     for check_path in possible_paths:
         if os.path.exists(check_path):
             try:
@@ -442,7 +415,6 @@ def mushroom_installed() -> bool:
                             return True
             except Exception as e:
                 print(f"Check error in {check_path}: {e}")
-
     return False
 
 
@@ -485,52 +457,42 @@ def install_mushroom() -> str:
     return "✅ Mushroom geïnstalleerd"
 
 
+# ✅ Fix 1: Update ensure_mushroom_resource - skip als endpoint niet bestaat
 def ensure_mushroom_resource() -> str:
+    """Probeer Mushroom resource te registreren (werkt niet altijd in YAML mode)"""
     local_url = "/local/community/lovelace-mushroom/dist/mushroom.js"
     cdn_url = "https://unpkg.com/lovelace-mushroom@latest/dist/mushroom.js"
 
-    resources = get_lovelace_resources()
-
-    for res in resources:
-        url = res.get("url", "")
-        if local_url in url or "mushroom" in url:
-            return "✅ Mushroom resource staat goed"
-
-    for url_to_try in [local_url, cdn_url]:
-        payload = {"type": "module", "url": url_to_try}
-        try:
-            r = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
-            if r.status_code in (200, 201):
-                source = "lokaal" if "local" in url_to_try else "CDN"
-                return f"✅ Mushroom resource toegevoegd ({source})"
-        except Exception as e:
-            print(f"Resource registration via {url_to_try} failed: {e}")
-            continue
-
-    return "✅ Mushroom resource (best effort) OK"
-
-
-# -----------------------------------------------------------------------------
-# Theme
-# -----------------------------------------------------------------------------
-def install_dashboard_theme(preset: str, density: str) -> str:
-    ensure_dir(DASHBOARD_THEME_DIR)
-    content = f"""# Dashboard Maker Theme
-dashboard_maker:
-  preset: "{preset}"
-  dashboard_density: "{density}"
-"""
-    write_text_file(DASHBOARD_THEME_FILE, content)
-    return "✅ Theme geïnstalleerd"
-
-
-def try_set_theme_auto() -> str:
     try:
-        ha_call_service("frontend", "set_theme", {"name": "dashboard_maker", "mode": "auto"})
-        return "✅ Theme geactiveerd (auto)"
+        # ✅ Test of resources endpoint bestaat
+        r = conn.request("GET", "/api/lovelace/resources", timeout=12)
+
+        if r.status_code == 404:
+            print("⚠️ Lovelace resources API niet beschikbaar (YAML mode)")
+            return "⚠️ Mushroom resource registratie overgeslagen (YAML mode - voeg handmatig toe)"
+
+        if r.status_code == 200:
+            resources = r.json()
+            for res in resources:
+                url = res.get("url", "")
+                if local_url in url or "mushroom" in url:
+                    return "✅ Mushroom resource staat goed"
+
+            for url_to_try in [local_url, cdn_url]:
+                payload = {"type": "module", "url": url_to_try}
+                try:
+                    rr = conn.request("POST", "/api/lovelace/resources", json_body=payload, timeout=12)
+                    if rr.status_code in (200, 201):
+                        source = "lokaal" if "local" in url_to_try else "CDN"
+                        return f"✅ Mushroom resource toegevoegd ({source})"
+                except Exception as e:
+                    print(f"Resource registration via {url_to_try} failed: {e}")
+                    continue
+
     except Exception as e:
-        print(f"try_set_theme_auto warning: {e}")
-        return "⚠️ Theme activeren niet gelukt (best effort)"
+        print(f"ensure_mushroom_resource warning: {e}")
+
+    return "⚠️ Mushroom resource moet handmatig toegevoegd worden in configuration.yaml onder lovelace → resources"
 
 
 # -----------------------------------------------------------------------------
@@ -601,7 +563,7 @@ def ensure_lovelace_config() -> Tuple[bool, str]:
     return True, "Lovelace config al correct"
 
 
-def register_dashboard_in_lovelace(filename: str, title: str, editable: bool = False) -> str:
+def register_dashboard_in_lovelace(filename: str, title: str) -> str:
     config_yaml_path = os.path.join(HA_CONFIG_PATH, "configuration.yaml")
 
     ok, msg = ensure_lovelace_config()
@@ -648,6 +610,56 @@ def register_dashboard_in_lovelace(filename: str, title: str, editable: bool = F
         return f"Dashboard '{title}' geregistreerd als '{dashboard_key}'"
     except Exception as e:
         return f"Schrijven gefaald: {e}"
+
+
+# -----------------------------------------------------------------------------
+# Theme
+# -----------------------------------------------------------------------------
+# ✅ Fix 4: Voeg instructies toe aan theme file voor handmatige resource config
+def install_dashboard_theme(preset: str, density: str) -> str:
+    ensure_dir(DASHBOARD_THEME_DIR)
+    content = f"""# Dashboard Maker Theme
+# ⚠️ BELANGRIJK: Voeg Mushroom resource handmatig toe in configuration.yaml:
+#
+# lovelace:
+#   mode: yaml
+#   resources:
+#     - url: /local/community/lovelace-mushroom/dist/mushroom.js
+#       type: module
+#   dashboards:
+#     # je dashboards hier
+
+dashboard_maker:
+  preset: "{preset}"
+  dashboard_density: "{density}"
+"""
+    write_text_file(DASHBOARD_THEME_FILE, content)
+    return "✅ Theme geïnstalleerd (check commentaar in theme file voor Mushroom setup)"
+
+
+# ✅ Fix 2: Update try_set_theme_auto - betere error handling
+def try_set_theme_auto() -> str:
+    """Probeer theme te activeren (werkt niet altijd)"""
+    try:
+        r = conn.request(
+            "POST",
+            "/api/services/frontend/set_theme",
+            json_body={"name": "dashboard_maker", "mode": "auto"},
+            timeout=12
+        )
+
+        if r.status_code in (200, 201):
+            return "✅ Theme geactiveerd (auto)"
+        elif r.status_code == 400:
+            print(f"⚠️ Theme service niet beschikbaar: {r.text[:200]}")
+            return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel)"
+        else:
+            print(f"⚠️ Theme activeren gefaald: HTTP {r.status_code}")
+            return "⚠️ Theme activeren overgeslagen (activeer handmatig)"
+
+    except Exception as e:
+        print(f"try_set_theme_auto warning: {e}")
+        return "⚠️ Theme activeren overgeslagen (activeer handmatig in HA profiel → Themes)"
 
 
 # -----------------------------------------------------------------------------
@@ -890,7 +902,10 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
                 area_cards.append({"type": "custom:mushroom-entity-card", "entity": hum["entity_id"], "icon": "mdi:water-percent"})
 
         if len(area_cards) == 1:
-            area_cards.append({"type": "markdown", "content": f"# {area_name}\n\n✅ Nog geen devices toegevoegd aan deze ruimte.\n\nVoeg devices toe via Instellingen → Apparaten & Diensten."})
+            area_cards.append({
+                "type": "markdown",
+                "content": f"# {area_name}\n\n✅ Nog geen devices toegevoegd aan deze ruimte.\n\nVoeg devices toe via Instellingen → Apparaten & Diensten."
+            })
 
         views.append({
             "title": area_name,
@@ -903,10 +918,6 @@ def build_area_based_dashboard(title: str) -> Dict[str, Any]:
     return {"title": title, "views": views}
 
 
-def build_dashboard_yaml(dashboard_title: str) -> Dict[str, Any]:
-    return build_area_based_dashboard(dashboard_title)
-
-
 # -----------------------------------------------------------------------------
 # API endpoints
 # -----------------------------------------------------------------------------
@@ -916,6 +927,7 @@ def index() -> Response:
     return Response(html, mimetype="text/html")
 
 
+# ✅ Fix 3: Update api_setup - verwijder lovelace.reload call (YAML mode)
 @app.route("/api/setup", methods=["POST"])
 def api_setup():
     ok, msg = conn.probe(force=True)
@@ -937,17 +949,20 @@ def api_setup():
         steps.append(install_dashboard_theme(preset, density))
         steps.append(try_set_theme_auto())
 
+        # ✅ Alleen core config reload (lovelace.reload werkt niet in YAML mode)
         ha_call_service("homeassistant", "reload_core_config", {})
         steps.append("✅ Core config herladen")
-        time.sleep(1)
-        ha_call_service("lovelace", "reload", {})
-        steps.append("✅ Lovelace herladen")
+        time.sleep(2)
+        steps.append("✅ Setup compleet - ververs je browser (F5)")
 
         return jsonify({"ok": True, "steps": steps}), 200
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "steps": steps}), 500
+        error_msg = str(e)
+        print(f"❌ Setup error: {error_msg}")
+        return jsonify({"ok": False, "error": error_msg, "steps": steps}), 500
 
 
+# ✅ Fix 2: Update api_create_dashboards - verwijder lovelace.reload
 @app.route("/api/create_dashboards", methods=["POST"])
 def api_create_dashboards():
     ok, msg = conn.probe(force=True)
@@ -973,9 +988,9 @@ def api_create_dashboards():
     reg_msg = register_dashboard_in_lovelace(fn, base_title)
 
     try:
+        # ✅ In YAML mode: alleen core reload nodig
         ha_call_service("homeassistant", "reload_core_config", {})
         time.sleep(2)
-        ha_call_service("lovelace", "reload", {})
     except Exception as e:
         print(f"⚠️ Reload warning: {e}")
 
@@ -989,39 +1004,16 @@ def api_create_dashboards():
     }), 200
 
 
-@app.route("/api/dashboards", methods=["GET"])
-def api_list_dashboards():
-    files = list_yaml_files(DASHBOARDS_PATH)
-    items = [{"name": Path(f).stem, "filename": f} for f in files]
-    return jsonify(items), 200
-
-
-@app.route("/api/download", methods=["GET"])
-def api_download():
-    filename = (request.args.get("filename") or "").strip()
-    if not filename:
-        return jsonify({"error": "filename ontbreekt"}), 400
-
-    safe = os.path.basename(filename)
-    path = os.path.join(DASHBOARDS_PATH, safe)
-    if not os.path.exists(path):
-        return jsonify({"error": "bestand niet gevonden"}), 404
-
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return Response(content, mimetype="text/plain; charset=utf-8")
-
-
+# ✅ Fix 3: Update api_reload_lovelace - safe reload voor YAML mode
 @app.route("/api/reload_lovelace", methods=["POST"])
 def api_reload_lovelace():
     try:
-        ha_call_service("lovelace", "reload", {})
-        return jsonify({"ok": True}), 200
+        ha_call_service("homeassistant", "reload_core_config", {})
+        return jsonify({"ok": True, "message": "Config herladen"}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# ✅ Fix 4: Update api_config endpoint met betere diagnostics
 @app.route("/api/config", methods=["GET"])
 def api_config():
     ok, msg = conn.probe(force=True)
@@ -1132,25 +1124,14 @@ HTML_PAGE = """<!DOCTYPE html>
           </button>
         </div>
       </div>
-
-      <div id="dashboardsList" class="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 mt-6 hidden">
-        <h2 class="text-2xl font-bold text-gray-800 mb-4">📚 Dashboards</h2>
-        <div id="dashboardsContent" class="space-y-3"></div>
-      </div>
-
     </div>
   </div>
 
 <script>
-  // ✅ Fix voor Ingress: API_BASE moet de huidige path prefix gebruiken
-  // Dit voorkomt dat fetch('/api/config') per ongeluk naar Home Assistant core gaat.
+  // Ingress-safe base path
   var API_BASE = (function() {
     var p = window.location.pathname || '/';
-    // remove trailing filename if any, keep directory
-    if (!p.endsWith('/')) {
-      p = p.substring(0, p.lastIndexOf('/') + 1);
-    }
-    // Ingress pad eindigt vaak op "/"
+    if (!p.endsWith('/')) p = p.substring(0, p.lastIndexOf('/') + 1);
     if (p.endsWith('/')) p = p.slice(0, -1);
     return p;
   })();
@@ -1168,27 +1149,19 @@ HTML_PAGE = """<!DOCTYPE html>
     el.className = 'text-sm mt-1 ' + (ok ? 'text-green-700' : 'text-red-700');
   }
 
-  // ✅ Belangrijk: veilig JSON parsen om "Unexpected non-whitespace..." te fixen
   async function fetchJsonSafe(url, opts) {
     var res = await fetch(url, opts || {});
     var text = await res.text();
-
-    // Probeer JSON te parsen, maar vang errors af en geef bruikbare info terug
     try {
       var data = JSON.parse(text);
       return { ok: res.ok, status: res.status, data: data, raw: text };
     } catch (e) {
       console.error('❌ Non-JSON response for', url, 'status', res.status, 'preview:', text.substring(0, 300));
-      return {
-        ok: false,
-        status: res.status,
-        data: null,
-        raw: text,
-        parse_error: e.message
-      };
+      return { ok: false, status: res.status, data: null, raw: text, parse_error: e.message };
     }
   }
 
+  // ✅ Fix 5: Update HTML met duidelijkere setup instructies
   async function runSetup() {
     try {
       setStatus('Setup...', 'yellow');
@@ -1206,7 +1179,19 @@ HTML_PAGE = """<!DOCTYPE html>
         return;
       }
 
-      alert('✅ Setup klaar!\\n\\n' + (r.data.steps ? r.data.steps.join('\\n') : ''));
+      var msg = '✅ Setup klaar!\\n\\n' + (r.data.steps ? r.data.steps.join('\\n') : '');
+      msg += '\\n\\n📝 HANDMATIGE STAPPEN:\\n';
+      msg += '1. Voeg Mushroom toe aan configuration.yaml:\\n\\n';
+      msg += 'lovelace:\\n';
+      msg += '  mode: yaml\\n';
+      msg += '  resources:\\n';
+      msg += '    - url: /local/community/lovelace-mushroom/dist/mushroom.js\\n';
+      msg += '      type: module\\n';
+      msg += '  dashboards: {}\\n\\n';
+      msg += '2. Herstart Home Assistant\\n';
+      msg += '3. Maak je dashboard aan';
+
+      alert(msg);
       setStatus('Setup klaar', 'green');
       init();
     } catch (e) {
@@ -1225,16 +1210,12 @@ HTML_PAGE = """<!DOCTYPE html>
 
     try {
       setStatus('Dashboard maken...', 'yellow');
-
       var dashboardType = document.getElementById('dashboardType').value || 'area_based';
 
       var r = await fetchJsonSafe(API_BASE + '/api/create_dashboards', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          base_title: base_title,
-          dashboard_type: dashboardType
-        })
+        body: JSON.stringify({ base_title: base_title, dashboard_type: dashboardType })
       });
 
       if (!r.ok || !r.data || !r.data.success) {
@@ -1252,13 +1233,11 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
 
-  // ✅ Fix 5: Update JavaScript init() in HTML met betere error display
   async function init() {
     setStatus('Verbinden…', 'yellow');
     try {
       var cfgRes = await fetchJsonSafe(API_BASE + '/api/config');
 
-      // Als response geen JSON is, fixen we exact jouw foutmelding met duidelijke output
       if (!cfgRes.data) {
         setStatus('Verbinding mislukt', 'red');
         setCheck('chkEngine', false, 'Kan niet verbinden: ' + (cfgRes.parse_error || 'Non-JSON response'));
@@ -1276,9 +1255,7 @@ HTML_PAGE = """<!DOCTYPE html>
         setStatus('Geen verbinding', 'red');
 
         var errorMsg = cfg.ha_message || 'Geen verbinding';
-        if (errorMsg.length > 100) {
-          errorMsg = errorMsg.substring(0, 100) + '...';
-        }
+        if (errorMsg.length > 100) errorMsg = errorMsg.substring(0, 100) + '...';
 
         setCheck('chkEngine', false, errorMsg);
 
@@ -1289,7 +1266,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
       setCheck('chkCards', true, cfg.mushroom_installed ? 'Al geïnstalleerd' : 'Klaar om te installeren');
       setCheck('chkStyle', true, cfg.theme_file_exists ? 'Al aanwezig' : 'Klaar om te installeren');
-
     } catch (e) {
       console.error('Init error:', e);
       setStatus('Verbinding mislukt', 'red');

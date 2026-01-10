@@ -380,6 +380,380 @@ add_template("unavailable_count_domain", {
     ),
 })
 
+# === NIEUWE TEMPLATES - VOEG TOE NA BESTAANDE TEMPLATES ===
+
+# Batterij monitoring - laagste batterij percentage
+add_template("battery_lowest", {
+    "title": "🔋 Laagste batterij percentage",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [],
+    "defaults": {"icon": "mdi:battery-alert"},
+    "suggestions": ["Selecteer battery sensors. Toont laagste waarde."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 100) | min }}",
+        "mdi:battery-alert",
+        {"unit_of_measurement": "%", "device_class": "battery"}
+    ),
+})
+
+# Hoogste temperatuur
+add_template("max_temp", {
+    "title": "🌡️ Hoogste temperatuur",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 1}],
+    "defaults": {"icon": "mdi:thermometer-high"},
+    "suggestions": ["Selecteer temperatuur sensoren."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | max | round(" + str(int(p.get("round", 1))) + ") }}",
+        "mdi:thermometer-high",
+        {"unit_of_measurement": "°C", "device_class": "temperature"}
+    ),
+})
+
+# Laagste temperatuur
+add_template("min_temp", {
+    "title": "🌡️ Laagste temperatuur",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 1}],
+    "defaults": {"icon": "mdi:thermometer-low"},
+    "suggestions": ["Selecteer temperatuur sensoren."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | min | round(" + str(int(p.get("round", 1))) + ") }}",
+        "mdi:thermometer-low",
+        {"unit_of_measurement": "°C", "device_class": "temperature"}
+    ),
+})
+
+# Gemiddelde luchtvochtigheid
+add_template("average_humidity", {
+    "title": "💧 Gemiddelde luchtvochtigheid",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 0}],
+    "defaults": {"icon": "mdi:water-percent"},
+    "suggestions": ["Selecteer humidity sensoren."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | average | round(" + str(int(p.get("round", 0))) + ") }}",
+        "mdi:water-percent",
+        {"unit_of_measurement": "%", "device_class": "humidity"}
+    ),
+})
+
+# Totaal energieverbruik (kWh)
+add_template("sum_energy", {
+    "title": "⚡ Som: totaal energieverbruik (kWh)",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}],
+    "defaults": {"icon": "mdi:lightning-bolt"},
+    "suggestions": ["Selecteer energy sensoren (kWh)."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | sum | round(" + str(int(p.get("round", 2))) + ") }}",
+        "mdi:lightning-bolt",
+        {"unit_of_measurement": "kWh", "device_class": "energy"}
+    ),
+})
+
+# Tel aan/uit switches
+add_template("count_switches_on", {
+    "title": "🔌 Tel switches aan",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:light-switch"},
+    "suggestions": ["Tel alle switches die 'on' zijn."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ states.switch | selectattr('state', 'eq', 'on') | list | count }}",
+        "mdi:light-switch",
+        {"unit_of_measurement": "switches"}
+    ),
+})
+
+# Tel open deuren/ramen
+add_template("count_doors_open", {
+    "title": "🚪 Tel open deuren/ramen",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:door-open"},
+    "suggestions": ["Tel binary_sensors met state 'on' of 'open'."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ states.binary_sensor | selectattr('state', 'in', ['on', 'open']) | list | count }}",
+        "mdi:door-open",
+        {"unit_of_measurement": "open"}
+    ),
+})
+
+# Tel bewegingsdetectoren actief
+add_template("count_motion", {
+    "title": "🏃 Tel actieve bewegingsdetectoren",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:motion-sensor"},
+    "suggestions": ["Tel binary_sensors met device_class 'motion' die 'on' zijn."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ states.binary_sensor | selectattr('attributes.device_class', 'eq', 'motion') | selectattr('state', 'eq', 'on') | list | count }}",
+        "mdi:motion-sensor",
+        {"unit_of_measurement": "actief"}
+    ),
+})
+
+# Tel media players actief
+add_template("count_media_playing", {
+    "title": "📺 Tel spelende media players",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:play-circle"},
+    "suggestions": ["Tel media_players die 'playing' zijn."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ states.media_player | selectattr('state', 'eq', 'playing') | list | count }}",
+        "mdi:play-circle",
+        {"unit_of_measurement": "playing"}
+    ),
+})
+
+# Alle lampen uit?
+add_template("all_lights_off", {
+    "title": "💡 Alle lampen uit? (binary)",
+    "kind": "binary_sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:lightbulb-off"},
+    "suggestions": ["True als alle lampen uit zijn."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_binary(
+        name, uid,
+        "{{ states.light | selectattr('state', 'eq', 'on') | list | count == 0 }}",
+        "mdi:lightbulb-off"
+    ),
+})
+
+# Iemand thuis?
+add_template("anyone_home", {
+    "title": "🏠 Iemand thuis? (binary)",
+    "kind": "binary_sensor",
+    "needs_entities": True,
+    "params": [],
+    "defaults": {"icon": "mdi:home-account"},
+    "suggestions": ["Selecteer person/device_tracker entities."],
+    "entity_filter": {"domains": ["person", "device_tracker"]},
+    "builder": lambda name, uid, p, entities=None: basic_binary(
+        name, uid,
+        "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | select('eq', 'home') | list | count) > 0 }}",
+        "mdi:home-account"
+    ),
+})
+
+# Regen voorspeld?
+add_template("rain_expected", {
+    "title": "🌧️ Regen voorspeld? (binary)",
+    "kind": "binary_sensor",
+    "needs_entities": True,
+    "params": [{"key": "threshold", "label": "Min. percentage (%)", "type": "float", "default": 50}],
+    "defaults": {"icon": "mdi:weather-rainy"},
+    "suggestions": ["Selecteer precipitation/rain probability sensor."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_binary(
+        name, uid,
+        "{{ states('" + (entities or [""])[0] + "') | float(0) > " + str(float(p.get("threshold", 50))) + " }}",
+        "mdi:weather-rainy"
+    ),
+})
+
+# Batterij laag waarschuwing
+add_template("battery_low", {
+    "title": "🔋 Batterij laag waarschuwing (binary)",
+    "kind": "binary_sensor",
+    "needs_entities": True,
+    "params": [{"key": "threshold", "label": "Drempel percentage", "type": "float", "default": 20}],
+    "defaults": {"icon": "mdi:battery-alert"},
+    "suggestions": ["True als één battery sensor onder drempel is."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_binary(
+        name, uid,
+        "{{ (" + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 100) | select('lt', " + str(float(p.get("threshold", 20))) + ") | list | count) > 0 }}",
+        "mdi:battery-alert"
+    ),
+})
+
+# Percentage berekening
+add_template("percentage_calc", {
+    "title": "📊 Percentage: (A/B) × 100",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 1}],
+    "defaults": {"icon": "mdi:percent"},
+    "suggestions": ["Selecteer PRECIES 2 entities: [teller, noemer]."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{% set a = states('" + (entities or ["", ""])[0] + "') | float(0) %}\n"
+        "{% set b = states('" + (entities or ["", ""])[1] + "') | float(1) %}\n"
+        "{{ ((a / b) * 100) | round(" + str(int(p.get("round", 1))) + ") if b != 0 else 0 }}",
+        "mdi:percent",
+        {"unit_of_measurement": "%"}
+    ),
+})
+
+# Delta/verschil tussen twee sensors
+add_template("difference_two", {
+    "title": "➖ Verschil: A - B",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [{"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}],
+    "defaults": {"icon": "mdi:delta"},
+    "suggestions": ["Selecteer PRECIES 2 entities."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ (states('" + (entities or ["", ""])[0] + "') | float(0) - states('" + (entities or ["", ""])[1] + "') | float(0)) | round(" + str(int(p.get("round", 2))) + ") }}",
+        "mdi:delta"
+    ),
+})
+
+# Kosten berekening (vermogen × prijs)
+add_template("cost_calc", {
+    "title": "💰 Kosten: Power × Prijs/kWh",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [
+        {"key": "price", "label": "Prijs per kWh (€)", "type": "float", "default": 0.30},
+        {"key": "round", "label": "Afronden (decimalen)", "type": "int", "default": 2}
+    ],
+    "defaults": {"icon": "mdi:currency-eur"},
+    "suggestions": ["Selecteer power sensor (W). Berekent kosten per uur."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ ((states('" + (entities or [""])[0] + "') | float(0) / 1000) * " + str(float(p.get("price", 0.30))) + ") | round(" + str(int(p.get("round", 2))) + ") }}",
+        "mdi:currency-eur",
+        {"unit_of_measurement": "€/h"}
+    ),
+})
+
+# Minuten tot volgende hele uur
+add_template("minutes_to_next_hour", {
+    "title": "⏰ Minuten tot volgende hele uur",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:clock-outline"},
+    "suggestions": ["Handig voor timers/automations."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ 60 - now().minute }}",
+        "mdi:clock-outline",
+        {"unit_of_measurement": "min"}
+    ),
+})
+
+# Dag van de week (Nederlands)
+add_template("day_of_week", {
+    "title": "📅 Dag van de week (NL)",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:calendar"},
+    "suggestions": ["Maandag, Dinsdag, etc."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ ['Maandag','Dinsdag','Woensdag','Donderdag','Vrijdag','Zaterdag','Zondag'][now().weekday()] }}",
+        "mdi:calendar"
+    ),
+})
+
+# Is het weekend?
+add_template("is_weekend", {
+    "title": "🎉 Is het weekend? (binary)",
+    "kind": "binary_sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:calendar-weekend"},
+    "suggestions": ["True op zaterdag en zondag."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_binary(
+        name, uid,
+        "{{ now().weekday() in [5, 6] }}",
+        "mdi:calendar-weekend"
+    ),
+})
+
+# Seizoen
+add_template("season", {
+    "title": "🍂 Seizoen (NL)",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:weather-partly-cloudy"},
+    "suggestions": ["Lente, Zomer, Herfst, Winter."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{% set m = now().month %}\n"
+        "{% if m in [3,4,5] %}Lente{% elif m in [6,7,8] %}Zomer{% elif m in [9,10,11] %}Herfst{% else %}Winter{% endif %}",
+        "mdi:weather-partly-cloudy"
+    ),
+})
+
+# Offline entities
+add_template("offline_entities", {
+    "title": "⚠️ Offline entities (alle domains)",
+    "kind": "sensor",
+    "needs_entities": False,
+    "params": [],
+    "defaults": {"icon": "mdi:access-point-network-off"},
+    "suggestions": ["Tel alle entities met unknown/unavailable."],
+    "entity_filter": {"domains": []},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ states | selectattr('state', 'in', ['unknown', 'unavailable']) | list | count }}",
+        "mdi:access-point-network-off",
+        {"unit_of_measurement": "entities"}
+    ),
+})
+
+# Zwakste WiFi signaal
+add_template("weakest_wifi", {
+    "title": "📶 Zwakste WiFi signaal (dBm)",
+    "kind": "sensor",
+    "needs_entities": True,
+    "params": [],
+    "defaults": {"icon": "mdi:wifi-strength-1"},
+    "suggestions": ["Selecteer WiFi signal strength sensors."],
+    "entity_filter": {"domains": ["sensor"]},
+    "builder": lambda name, uid, p, entities=None: basic_sensor(
+        name, uid,
+        "{{ " + entities_to_jinja_list(entities or []) + " | map('states') | reject('in',['unknown','unavailable']) | map('float', 0) | min }}",
+        "mdi:wifi-strength-1",
+        {"unit_of_measurement": "dBm"}
+    ),
+})
+
 def build_template_config(template_type: str, name: str, safe_name: str, icon: str,
                           entities: List[str], params: Dict[str, Any]):
     if template_type not in TEMPLATE_CATALOG:
@@ -392,8 +766,10 @@ def build_template_config(template_type: str, name: str, safe_name: str, icon: s
     if spec.get("needs_entities"):
         if not entities:
             return None, "Deze template heeft entities nodig."
-        if template_type in ("last_changed_human", "age_minutes") and len(entities) != 1:
+        if template_type in ("last_changed_human", "age_minutes", "rain_expected", "cost_calc") and len(entities) != 1:
             return None, "Selecteer precies 1 entity voor dit type."
+        if template_type in ("percentage_calc", "difference_two") and len(entities) != 2:
+            return None, "Selecteer precies 2 entities voor dit type."
 
     cfg = spec["builder"](name, uid, params, entities=entities)
 
@@ -812,7 +1188,10 @@ def index():
       return;
     }}
 
-    hint.textContent = (typeKey === 'last_changed_human' || typeKey === 'age_minutes') ? 'Selecteer precies 1 entity.' : 'Selecteer 1 of meer entities.';
+    hint.textContent =
+      (typeKey === 'last_changed_human' || typeKey === 'age_minutes' || typeKey === 'rain_expected' || typeKey === 'cost_calc')
+        ? 'Selecteer precies 1 entity.'
+        : ((typeKey === 'percentage_calc' || typeKey === 'difference_two') ? 'Selecteer precies 2 entities.' : 'Selecteer 1 of meer entities.');
 
     let filtered = entities;
     const domains = (catalog[typeKey] && catalog[typeKey].entity_filter && catalog[typeKey].entity_filter.domains) || [];

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 — 🎉 IT LEEFT! (Beta)
+## 1.0.0 — 🎉 HET LEEFT! (Beta)
 
 Na een onbekend aantal koffie’s, herstarts, “waarom doet dit niks”-momenten  
 en minstens één existentiële crisis… is Automation Maker **eindelijk in beta**.

@@ -7,13 +7,17 @@ Goals:
 - Plays nice with Home Assistant Ingress (including weird /api/hassio_ingress/... paths)
 - Beginner-friendly test steps (human text) + optional tech details in `extra.tech`
 
-Included fixes & improvements:
-1) Slimmere conflict detection (tijd overlap check)
-2) Templates/Voorbeelden (kindvriendelijk) -> /api/templates
-3) Validatie verbeteringen (extra UX checks)
-4) Backup functie -> /api/backup (ZIP)
-5) Dependency check (entity bestaat?) -> warnings
-6) Smart suggestions (AI-powered) -> /api/suggestions
+Features / Fixes included:
+1) Advanced Dutch Search endpoint: /api/automations/search
+2) Safety checks on create/update with confirmation flow:
+   - infinite loop detection
+   - conflicts detection (incl. overlapping days + near-time overlap within 5 minutes)
+   - dangerous actions requiring confirmation
+3) Templates/Voorbeelden (kindvriendelijk): /api/templates
+4) Extra validatie (errors) + time warnings (info): validate_automation + get_time_warnings
+5) Backup (ZIP download): /api/backup
+6) Dependency check (entity bestaat?): validate_entities_exist
+7) Smart suggestions: /api/suggestions
 """
 
 from __future__ import annotations
@@ -121,6 +125,7 @@ def normalize_dutch_text(text: str) -> str:
     if not text:
         return ""
 
+    # Lowercase
     text = text.lower().strip()
 
     # Remove accents (é → e, ë → e, etc.)
@@ -129,6 +134,7 @@ def normalize_dutch_text(text: str) -> str:
         if unicodedata.category(c) != "Mn"
     )
 
+    # Common Dutch synonyms/variations
     replacements = {
         "licht": "lamp",
         "verlichting": "lamp",
@@ -183,7 +189,10 @@ def normalize_dutch_text(text: str) -> str:
 
 
 def search_automations_dutch(query: str, automations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Zoek automations met uitgebreide Nederlandse ondersteuning."""
+    """
+    Zoek automations met uitgebreide Nederlandse ondersteuning.
+    Returns: lijst van automations gesorteerd op relevantie (hoogste eerst)
+    """
     if not query or not query.strip():
         return automations
 
@@ -200,6 +209,7 @@ def search_automations_dutch(query: str, automations: List[Dict[str, Any]]) -> L
         normalized_name = normalize_dutch_text(name)
         normalized_filename = normalize_dutch_text(filename)
 
+        # Exact match = super hoge score
         if normalized_query in normalized_name or normalized_query in normalized_filename:
             score += 1000
 
@@ -207,12 +217,15 @@ def search_automations_dutch(query: str, automations: List[Dict[str, Any]]) -> L
         filename_words = set(normalized_filename.split())
         all_words = name_words | filename_words
 
+        # Elk query woord dat matcht
         matching_words = query_words & all_words
         score += len(matching_words) * 100
 
+        # Bonus voor woorden aan het begin
         if any(normalized_name.startswith(word) for word in query_words):
             score += 50
 
+        # Partial matching (substring)
         for qword in query_words:
             if len(qword) >= 3:
                 for aword in all_words:
@@ -227,7 +240,7 @@ def search_automations_dutch(query: str, automations: List[Dict[str, Any]]) -> L
 
 
 # -----------------------------------------------------------------------------
-# Safety checks + improvements
+# Safety Checks + Validation
 # -----------------------------------------------------------------------------
 def check_infinite_loop(automation: Dict[str, Any]) -> Dict[str, Any] | None:
     """
@@ -253,9 +266,6 @@ def check_infinite_loop(automation: Dict[str, Any]) -> Dict[str, Any] | None:
     return None
 
 
-# -----------------------------------------------------------------------------
-# FIX 1: Slimmere conflict detection (tijd overlap check)
-# -----------------------------------------------------------------------------
 def check_time_overlap(time1: str, time2: str, margin_minutes: int = 5) -> bool:
     """
     Check of twee tijden te dicht bij elkaar liggen.
@@ -273,7 +283,10 @@ def check_time_overlap(time1: str, time2: str, margin_minutes: int = 5) -> bool:
 def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Detecteer conflicten met bestaande automations.
-    NIEUW: Check ook tijden die te dicht bij elkaar liggen
+    NIEUW:
+    - Days overlap check (incl. "geen dagen" = alle dagen)
+    - Exactzelfde tijd check
+    - "Bijna gelijktijdig" (binnen 5 minuten) tegenstrijdig check (info)
     """
     conflicts: List[Dict[str, Any]] = []
 
@@ -307,6 +320,7 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
             existing_days = set(existing_trigger.get("days", []))
             existing_time = existing_trigger.get("value", "") if existing_trigger.get("type") == "time" else None
 
+            # Check overlappende dagen
             has_overlapping_days = (
                 (not trigger_days and not existing_days) or
                 (not trigger_days and existing_days) or
@@ -316,6 +330,7 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
 
             if trigger_type == "time" and existing_trigger.get("type") == "time" and has_overlapping_days:
                 if action_entity == existing_action.get("value"):
+
                     # ✅ EXACT dezelfde tijd
                     if trigger_time == existing_time:
                         if (
@@ -325,14 +340,14 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
                             conflicts.append({
                                 "automation": existing.get("name", "Onbekend"),
                                 "conflict": f"⚠️ '{existing.get('name')}' doet het tegenovergestelde "
-                                           f"om {trigger_time} met '{action_entity}'!",
+                                            f"om {trigger_time} met '{action_entity}'!",
                                 "severity": "warning",
                             })
                         elif action_type == existing_action.get("type"):
                             conflicts.append({
                                 "automation": existing.get("name", "Onbekend"),
                                 "conflict": f"ℹ️ '{existing.get('name')}' doet precies hetzelfde "
-                                           f"om {trigger_time}. Dubbel werk?",
+                                            f"om {trigger_time}. Dubbel werk?",
                                 "severity": "info",
                             })
 
@@ -345,7 +360,7 @@ def check_conflicts(automation: Dict[str, Any], existing_automations: List[Dict[
                             conflicts.append({
                                 "automation": existing.get("name", "Onbekend"),
                                 "conflict": f"⏰ '{existing.get('name')}' gebeurt bijna gelijktijdig "
-                                           f"({existing_time} vs {trigger_time}) en doet het tegenovergestelde met '{action_entity}'.",
+                                            f"({existing_time} vs {trigger_time}) en doet het tegenovergestelde met '{action_entity}'.",
                                 "severity": "info",
                             })
 
@@ -367,21 +382,28 @@ def check_dangerous_action(automation: Dict[str, Any]) -> Dict[str, Any] | None:
 
     dangerous_patterns: List[Dict[str, Any]] = []
 
+    # Alles uitzetten
     if action_type == "turn_off":
         if "all" in action_entity or "alles" in action_entity or ".*" in action_entity:
-            dangerous_patterns.append({
-                "warning": "🚨 Je zet ALLES uit! Weet je het zeker?",
-                "severity": "danger",
-                "require_confirmation": True,
-            })
+            dangerous_patterns.append(
+                {
+                    "warning": "🚨 Je zet ALLES uit! Weet je het zeker?",
+                    "severity": "danger",
+                    "require_confirmation": True,
+                }
+            )
 
+        # Verwarming uit
         if any(word in action_entity for word in ["heat", "verwarming", "cv", "therm"]):
-            dangerous_patterns.append({
-                "warning": "🥶 Let op: verwarming uitzetten kan gevaarlijk zijn bij vriesweer!",
-                "severity": "warning",
-                "require_confirmation": True,
-            })
+            dangerous_patterns.append(
+                {
+                    "warning": "🥶 Let op: verwarming uitzetten kan gevaarlijk zijn bij vriesweer!",
+                    "severity": "warning",
+                    "require_confirmation": True,
+                }
+            )
 
+    # Alle lampen uit 's nachts
     trigger = automation.get("trigger") or {}
     if action_type == "turn_off" and "light" in action_entity:
         if trigger.get("type") == "time":
@@ -389,20 +411,20 @@ def check_dangerous_action(automation: Dict[str, Any]) -> Dict[str, Any] | None:
             try:
                 hour = int(time_str.split(":")[0])
                 if 0 <= hour <= 5:
-                    dangerous_patterns.append({
-                        "warning": "💡 Alle lampen uit midden in de nacht? Denk aan veiligheid (bijv. nachtlampje).",
-                        "severity": "info",
-                        "require_confirmation": False,
-                    })
+                    dangerous_patterns.append(
+                        {
+                            "warning": "💡 Alle lampen uit midden in de nacht? "
+                                       "Denk aan veiligheid (bijv. nachtlampje).",
+                            "severity": "info",
+                            "require_confirmation": False,
+                        }
+                    )
             except Exception:
                 pass
 
     return dangerous_patterns[0] if dangerous_patterns else None
 
 
-# -----------------------------------------------------------------------------
-# FIX 3: Validatie verbeteringen
-# -----------------------------------------------------------------------------
 def validate_automation(automation: Dict[str, Any]) -> List[str]:
     """
     Extra validaties voor betere UX.
@@ -413,7 +435,7 @@ def validate_automation(automation: Dict[str, Any]) -> List[str]:
     action = automation.get("action") or {}
     trigger = automation.get("trigger") or {}
 
-    # Check 1: Lamp brightness = 0
+    # Check 1: Lamp brightness = 0 (onzinnig)
     if action.get("type") == "turn_on" and action.get("brightness") == 0:
         errors.append("Helderheid is 0%! De lamp gaat dan niet echt aan. Kies een waarde tussen 1-255.")
 
@@ -421,16 +443,7 @@ def validate_automation(automation: Dict[str, Any]) -> List[str]:
     if action.get("type") == "notify" and not (action.get("value") or "").strip():
         errors.append("Je wilt een melding sturen maar er staat geen tekst in!")
 
-    # Check 3: Time trigger in het verleden (vandaag)
-    if trigger.get("type") == "time":
-        try:
-            now = datetime.now()
-            trig_t = datetime.strptime(trigger.get("value", "00:00"), "%H:%M")
-            trig_t = trig_t.replace(year=now.year, month=now.month, day=now.day)
-            if trig_t < now - timedelta(hours=2):
-                errors.append(f"⏰ Let op: {trigger.get('value')} is al geweest vandaag. Deze automation draait pas morgen!")
-        except Exception:
-            pass
+    # Check 3: VERWIJDERD - tijd check verplaatst naar warnings
 
     # Check 4: Scene zonder entity_id
     if action.get("type") == "scene" and not (action.get("value") or "").strip():
@@ -443,11 +456,34 @@ def validate_automation(automation: Dict[str, Any]) -> List[str]:
     return errors
 
 
-# -----------------------------------------------------------------------------
-# FIX 5: Dependency check (entity bestaat?)
-# -----------------------------------------------------------------------------
+def get_time_warnings(automation: Dict[str, Any]) -> List[str]:
+    """
+    Geef warnings (geen errors) voor tijd checks.
+    """
+    warnings: List[str] = []
+    trigger = automation.get("trigger") or {}
+
+    if trigger.get("type") == "time":
+        try:
+            now = datetime.now()
+            trigger_time = datetime.strptime(trigger.get("value", "00:00"), "%H:%M")
+            trigger_time = trigger_time.replace(year=now.year, month=now.month, day=now.day)
+
+            # Alleen waarschuwen als het >2 uur geleden is
+            if trigger_time < now - timedelta(hours=2):
+                warnings.append(
+                    f"⏰ Let op: {trigger.get('value')} is al geweest vandaag. Deze automation draait pas morgen!"
+                )
+        except Exception:
+            pass
+
+    return warnings
+
+
 def check_entity_exists(entity_id: str) -> bool:
-    """Check of een entity nog bestaat in Home Assistant."""
+    """
+    Check of een entity nog bestaat in Home Assistant.
+    """
     if not entity_id or not SUPERVISOR_TOKEN:
         return False
 
@@ -455,6 +491,7 @@ def check_entity_exists(entity_id: str) -> bool:
         resp = requests.get("http://supervisor/core/api/states", headers=ha_headers(), timeout=5)
         if resp.status_code != 200:
             return False
+
         states = resp.json()
         return any(s.get("entity_id") == entity_id for s in states)
     except Exception:
@@ -462,48 +499,28 @@ def check_entity_exists(entity_id: str) -> bool:
 
 
 def validate_entities_exist(automation: Dict[str, Any]) -> List[str]:
-    """Check of alle entities in de automation nog bestaan. Returns: lijst van warnings."""
+    """
+    Check of alle entities in de automation nog bestaan.
+    Returns: lijst van warnings
+    """
     warnings: List[str] = []
 
     trigger = automation.get("trigger") or {}
     action = automation.get("action") or {}
 
+    # Check trigger entity
     if trigger.get("type") == "state":
         entity = trigger.get("value", "")
         if entity and not check_entity_exists(entity):
             warnings.append(f"⚠️ Entity '{entity}' bestaat niet (meer) in Home Assistant!")
 
+    # Check action entity
     if action.get("type") in ["turn_on", "turn_off", "scene"]:
         entity = action.get("value", "")
         if entity and not check_entity_exists(entity):
             warnings.append(f"⚠️ Entity '{entity}' bestaat niet (meer) in Home Assistant!")
 
     return warnings
-
-
-def get_current_temperature() -> float | None:
-    """Haal huidige temperatuur op (optioneel, voor slimme checks)."""
-    try:
-        if not SUPERVISOR_TOKEN:
-            return None
-
-        resp = requests.get("http://supervisor/core/api/states", headers=ha_headers(), timeout=5)
-        if resp.status_code != 200:
-            return None
-
-        states = resp.json()
-        for state in states:
-            entity_id = state.get("entity_id", "")
-            if "weather." in entity_id or "temperature" in entity_id.lower():
-                try:
-                    temp = float(state.get("state", 999))
-                    if -50 < temp < 50:
-                        return temp
-                except Exception:
-                    continue
-        return None
-    except Exception:
-        return None
 
 
 # -----------------------------------------------------------------------------
@@ -548,6 +565,7 @@ def parse_trigger_from_yaml(trigger_list: Any, condition_list: Any = None) -> Di
     t = trigger_list[0] or {}
     platform = t.get("platform", "")
 
+    # Check for weekday condition
     selected_days: List[str] = []
     if condition_list and isinstance(condition_list, list):
         for cond in condition_list:
@@ -598,6 +616,7 @@ def parse_action_from_yaml(action_list: Any) -> Dict[str, Any]:
     a = action_list[0] or {}
     service = a.get("service", "")
 
+    # Light on/off with color/brightness
     if service in ("light.turn_on", "light.turn_off"):
         entity_id = ((a.get("target") or {}).get("entity_id")) or ""
         model: Dict[str, Any] = {
@@ -611,6 +630,7 @@ def parse_action_from_yaml(action_list: Any) -> Dict[str, Any]:
             model["brightness"] = data["brightness"]
         return model
 
+    # generic on/off
     if service in ("homeassistant.turn_on", "homeassistant.turn_off"):
         return {
             "type": "turn_on" if service.endswith(".turn_on") else "turn_off",
@@ -641,6 +661,7 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
         "mode": "single",
     }]
 
+    # Trigger
     ttype = trigger.get("type")
     selected_days = trigger.get("days", [])
 
@@ -668,6 +689,7 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
     else:
         yaml_data[0]["trigger"].append({"platform": "time", "at": "12:00"})
 
+    # Add weekday condition if days are selected
     if selected_days and len(selected_days) > 0:
         yaml_data[0]["condition"].append({
             "condition": "time",
@@ -677,6 +699,7 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
     if not yaml_data[0]["condition"]:
         del yaml_data[0]["condition"]
 
+    # Action
     atype = action.get("type")
     entity_id = (action.get("value") or "").strip()
     domain = entity_id.split(".")[0] if "." in entity_id else ""
@@ -723,6 +746,253 @@ def generate_automation_yaml(automation: Dict[str, Any]) -> str:
     yaml_data[0]["action"] = [action_config]
 
     return yaml.dump(yaml_data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
+# -----------------------------------------------------------------------------
+# Templates (kindvriendelijk)
+# -----------------------------------------------------------------------------
+@app.route("/api/templates", methods=["GET"])
+def api_get_templates():
+    """
+    Geef lijst met voorbeelden die een kind van 5 kan snappen.
+    Elk template heeft een emoji, simpele naam en uitleg.
+    """
+    templates = [
+        {
+            "id": "lamp_avond",
+            "emoji": "🌙",
+            "name": "Lampje aan als het donker wordt",
+            "description": "Als de zon ondergaat, gaat de lamp in de woonkamer aan. Zo is het niet donker!",
+            "automation": {
+                "name": "Lamp aan bij zonsondergang",
+                "trigger": {
+                    "type": "sun",
+                    "sunEvent": "sunset",
+                    "sunOffset": "after",
+                    "sunMinutes": "0"
+                },
+                "action": {
+                    "type": "turn_on",
+                    "value": "light.woonkamer"  # User moet dit aanpassen
+                }
+            }
+        },
+        {
+            "id": "lamp_ochtend",
+            "emoji": "☀️",
+            "name": "Lampje uit als het licht wordt",
+            "description": "Als de zon opkomt, gaat de lamp uit. Want dan is het al licht buiten!",
+            "automation": {
+                "name": "Lamp uit bij zonsopgang",
+                "trigger": {
+                    "type": "sun",
+                    "sunEvent": "sunrise",
+                    "sunOffset": "after",
+                    "sunMinutes": "0"
+                },
+                "action": {
+                    "type": "turn_off",
+                    "value": "light.woonkamer"
+                }
+            }
+        },
+        {
+            "id": "ochtend_routine",
+            "emoji": "⏰",
+            "name": "Wakker worden op school dagen",
+            "description": "Op maandag tot vrijdag om 7 uur gaat de lamp aan. Tijd om op te staan!",
+            "automation": {
+                "name": "Ochtend routine weekdagen",
+                "trigger": {
+                    "type": "time",
+                    "value": "07:00",
+                    "days": ["mon", "tue", "wed", "thu", "fri"]
+                },
+                "action": {
+                    "type": "turn_on",
+                    "value": "light.slaapkamer"
+                }
+            }
+        },
+        {
+            "id": "slapen_gaan",
+            "emoji": "😴",
+            "name": "Alle lampjes uit, tijd om te slapen",
+            "description": "Om 9 uur 's avonds gaan alle lampjes uit. Welterusten!",
+            "automation": {
+                "name": "Slaaptijd - alle lampen uit",
+                "trigger": {
+                    "type": "time",
+                    "value": "21:00"
+                },
+                "action": {
+                    "type": "turn_off",
+                    "value": "light.all"  # User moet groep maken
+                }
+            }
+        },
+        {
+            "id": "weekend_uitslapen",
+            "emoji": "🛏️",
+            "name": "Weekend: later opstaan",
+            "description": "Op zaterdag en zondag mag je uitslapen! Lamp gaat pas om 9 uur aan.",
+            "automation": {
+                "name": "Weekend ochtend",
+                "trigger": {
+                    "type": "time",
+                    "value": "09:00",
+                    "days": ["sat", "sun"]
+                },
+                "action": {
+                    "type": "turn_on",
+                    "value": "light.slaapkamer"
+                }
+            }
+        },
+        {
+            "id": "herinnering",
+            "emoji": "📢",
+            "name": "Herinnering: tanden poetsen",
+            "description": "Elke avond om half 9 krijg je een berichtje dat je je tanden moet poetsen!",
+            "automation": {
+                "name": "Herinnering tandenpoetsen",
+                "trigger": {
+                    "type": "time",
+                    "value": "20:30"
+                },
+                "action": {
+                    "type": "notify",
+                    "value": "Niet vergeten: tanden poetsen! 🪥",
+                    "service": "notify.notify"
+                }
+            }
+        }
+    ]
+
+    return jsonify(templates)
+
+
+# -----------------------------------------------------------------------------
+# Backup (ZIP)
+# -----------------------------------------------------------------------------
+@app.route("/api/backup", methods=["GET"])
+def api_backup_all():
+    """
+    Download alle automations als ZIP bestand.
+    """
+    try:
+        if not os.path.exists(AUTOMATIONS_PATH):
+            return jsonify({"error": "Geen automations map gevonden"}), 404
+
+        zip_buffer = BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for filename in os.listdir(AUTOMATIONS_PATH):
+                if filename.endswith('.yaml'):
+                    file_path = safe_join(AUTOMATIONS_PATH, filename)
+                    if os.path.exists(file_path):
+                        zip_file.write(file_path, filename)
+
+        zip_buffer.seek(0)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        return send_file(
+            zip_buffer,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'automation_backup_{timestamp}.zip'
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# Smart suggestions
+# -----------------------------------------------------------------------------
+@app.route("/api/suggestions", methods=["POST"])
+def api_get_suggestions():
+    """
+    AI-powered suggesties voor verbetering van automation.
+    """
+    try:
+        data = request.json or {}
+        automation = data.get("automation") or {}
+
+        suggestions: List[Dict[str, Any]] = []
+
+        trigger = automation.get("trigger") or {}
+        action = automation.get("action") or {}
+
+        # Suggestie 1: Lamp aan maar niet uit
+        if action.get("type") == "turn_on" and trigger.get("type") in ["time", "sun"]:
+            entity = action.get("value", "")
+            if entity.startswith("light."):
+                suggestions.append({
+                    "icon": "💡",
+                    "title": "Vergeet je de lamp uit te zetten?",
+                    "description": f"Je zet '{entity}' aan, maar ik zie geen automation die hem weer uitzet. "
+                                   "Wil je ook een 'uit' automation maken?",
+                    "severity": "tip"
+                })
+
+        # Suggestie 2: Elke dag maar zou weekdays kunnen zijn
+        if trigger.get("type") == "time" and not trigger.get("days"):
+            time_val = trigger.get("value", "")
+            try:
+                hour = int(time_val.split(":")[0])
+                if 6 <= hour <= 9 or 22 <= hour <= 23:
+                    suggestions.append({
+                        "icon": "📅",
+                        "title": "Misschien alleen op doordeweekse dagen?",
+                        "description": f"Deze automation draait om {time_val} elke dag. "
+                                       "Wil je in het weekend misschien uitslapen of later naar bed?",
+                        "severity": "tip"
+                    })
+            except Exception:
+                pass
+
+        # Suggestie 3: Brightness te laag
+        if action.get("type") == "turn_on":
+            brightness = action.get("brightness")
+            try:
+                if brightness is not None and int(brightness) < 50:
+                    suggestions.append({
+                        "icon": "🔅",
+                        "title": "Lamp staat vrij donker",
+                        "description": f"De helderheid is {brightness}/255. Dat is best donker! "
+                                       "Is dat expres (bijv. nachtlampje)?",
+                        "severity": "info"
+                    })
+            except Exception:
+                pass
+
+        # Suggestie 4: Zonsondergang maar geen dagen filter
+        if trigger.get("type") == "sun" and trigger.get("sunEvent") == "sunset":
+            if not trigger.get("days"):
+                suggestions.append({
+                    "icon": "🌅",
+                    "title": "Elke dag zonsondergang",
+                    "description": "Deze automation gaat af bij elke zonsondergang. "
+                                   "Misschien wil je dit alleen in het weekend of juist doordeweeks?",
+                    "severity": "tip"
+                })
+
+        # Suggestie 5: Scene tip
+        if action.get("type") == "scene":
+            suggestions.append({
+                "icon": "✨",
+                "title": "Scene tip",
+                "description": "Je gebruikt een scene! Dat is slim. "
+                               "Tip: Maak scenes voor 'Ochtend', 'Avond', 'Film kijken' etc. "
+                               "Dan kun je met 1 knop alles instellen.",
+                "severity": "tip"
+            })
+
+        return jsonify(suggestions)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # -----------------------------------------------------------------------------
@@ -801,115 +1071,7 @@ def api_get_automation(filename: str):
 
 
 # -----------------------------------------------------------------------------
-# FIX 2: Templates/Voorbeelden (kindvriendelijk)
-# -----------------------------------------------------------------------------
-@app.route("/api/templates", methods=["GET"])
-def api_get_templates():
-    templates = [
-        {
-            "id": "lamp_avond",
-            "emoji": "🌙",
-            "name": "Lampje aan als het donker wordt",
-            "description": "Als de zon ondergaat, gaat de lamp in de woonkamer aan. Zo is het niet donker!",
-            "automation": {
-                "name": "Lamp aan bij zonsondergang",
-                "trigger": {"type": "sun", "sunEvent": "sunset", "sunOffset": "after", "sunMinutes": "0"},
-                "action": {"type": "turn_on", "value": "light.woonkamer"},
-            },
-        },
-        {
-            "id": "lamp_ochtend",
-            "emoji": "☀️",
-            "name": "Lampje uit als het licht wordt",
-            "description": "Als de zon opkomt, gaat de lamp uit. Want dan is het al licht buiten!",
-            "automation": {
-                "name": "Lamp uit bij zonsopgang",
-                "trigger": {"type": "sun", "sunEvent": "sunrise", "sunOffset": "after", "sunMinutes": "0"},
-                "action": {"type": "turn_off", "value": "light.woonkamer"},
-            },
-        },
-        {
-            "id": "ochtend_routine",
-            "emoji": "⏰",
-            "name": "Wakker worden op school dagen",
-            "description": "Op maandag tot vrijdag om 7 uur gaat de lamp aan. Tijd om op te staan!",
-            "automation": {
-                "name": "Ochtend routine weekdagen",
-                "trigger": {"type": "time", "value": "07:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
-                "action": {"type": "turn_on", "value": "light.slaapkamer"},
-            },
-        },
-        {
-            "id": "slapen_gaan",
-            "emoji": "😴",
-            "name": "Alle lampjes uit, tijd om te slapen",
-            "description": "Om 9 uur 's avonds gaan alle lampjes uit. Welterusten!",
-            "automation": {
-                "name": "Slaaptijd - alle lampen uit",
-                "trigger": {"type": "time", "value": "21:00"},
-                "action": {"type": "turn_off", "value": "light.all"},
-            },
-        },
-        {
-            "id": "weekend_uitslapen",
-            "emoji": "🛏️",
-            "name": "Weekend: later opstaan",
-            "description": "Op zaterdag en zondag mag je uitslapen! Lamp gaat pas om 9 uur aan.",
-            "automation": {
-                "name": "Weekend ochtend",
-                "trigger": {"type": "time", "value": "09:00", "days": ["sat", "sun"]},
-                "action": {"type": "turn_on", "value": "light.slaapkamer"},
-            },
-        },
-        {
-            "id": "herinnering",
-            "emoji": "📢",
-            "name": "Herinnering: tanden poetsen",
-            "description": "Elke avond om half 9 krijg je een berichtje dat je je tanden moet poetsen!",
-            "automation": {
-                "name": "Herinnering tandenpoetsen",
-                "trigger": {"type": "time", "value": "20:30"},
-                "action": {"type": "notify", "value": "Niet vergeten: tanden poetsen! 🪥", "service": "notify.notify"},
-            },
-        },
-    ]
-    return jsonify(templates)
-
-
-# -----------------------------------------------------------------------------
-# FIX 4: Backup functie (ZIP)
-# -----------------------------------------------------------------------------
-@app.route("/api/backup", methods=["GET"])
-def api_backup_all():
-    """Download alle automations als ZIP bestand."""
-    try:
-        if not os.path.exists(AUTOMATIONS_PATH):
-            return jsonify({"error": "Geen automations map gevonden"}), 404
-
-        zip_buffer = BytesIO()
-
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for filename in os.listdir(AUTOMATIONS_PATH):
-                if filename.endswith(".yaml"):
-                    file_path = safe_join(AUTOMATIONS_PATH, filename)
-                    if os.path.exists(file_path):
-                        zip_file.write(file_path, filename)
-
-        zip_buffer.seek(0)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        return send_file(
-            zip_buffer,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name=f"automation_backup_{timestamp}.zip",
-        )
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# -----------------------------------------------------------------------------
-# Create/Update automation (met validatie + warnings + confirmation)
+# Create automation (with validation + safety checks + confirmation)
 # -----------------------------------------------------------------------------
 @app.route("/api/automation", methods=["POST"])
 def api_create_automation():
@@ -918,16 +1080,9 @@ def api_create_automation():
         if "automation" not in data:
             return jsonify({"error": "Geen automation data ontvangen"}), 400
 
-        automation = data.get("automation") or {}
-
-        # ✅ NIEUW: Validatie
-        validation_errors = validate_automation(automation)
-        if validation_errors:
-            return jsonify({
-                "error": "Validatie fouten gevonden:\n" + "\n".join(f"• {e}" for e in validation_errors)
-            }), 400
-
+        automation = data["automation"] or {}
         name = automation.get("name", "unnamed")
+
         filename = f"{sanitize_filename(name)}.yaml"
         fp = safe_join(AUTOMATIONS_PATH, filename)
 
@@ -936,16 +1091,29 @@ def api_create_automation():
 
         warnings: List[Dict[str, Any]] = []
 
-        # ✅ NIEUW: Entity dependency warnings
+        # ✅ Validatie (blocking errors)
+        validation_errors = validate_automation(automation)
+        if validation_errors:
+            return jsonify({
+                "error": "Validatie fouten gevonden:\n" + "\n".join(f"• {e}" for e in validation_errors)
+            }), 400
+
+        # ✅ Time warnings (niet blocking)
+        time_warns = get_time_warnings(automation)
+        for w in time_warns:
+            warnings.append({"warning": w, "severity": "info"})
+
+        # ✅ Entity warnings (niet blocking)
         entity_warnings = validate_entities_exist(automation)
-        if entity_warnings:
-            warnings.extend([{"warning": w, "severity": "warning"} for w in entity_warnings])
+        for w in entity_warnings:
+            warnings.append({"warning": w, "severity": "warning"})
 
         # Safety checks
         loop_check = check_infinite_loop(automation)
         if loop_check:
             warnings.append(loop_check)
 
+        # Load existing automations
         existing: List[Dict[str, Any]] = []
         if os.path.exists(AUTOMATIONS_PATH):
             for fn in os.listdir(AUTOMATIONS_PATH):
@@ -968,6 +1136,7 @@ def api_create_automation():
 
         has_critical = any(w.get("severity") in ["error", "danger"] for w in warnings)
         confirmed = bool(data.get("confirmed", False))
+
         if has_critical and not confirmed:
             return jsonify({
                 "warnings": warnings,
@@ -995,6 +1164,9 @@ def api_create_automation():
         return jsonify({"error": str(e)}), 500
 
 
+# -----------------------------------------------------------------------------
+# Update automation (with validation + safety checks + confirmation)
+# -----------------------------------------------------------------------------
 @app.route("/api/automation/<filename>", methods=["PUT"])
 def api_update_automation(filename: str):
     try:
@@ -1006,26 +1178,31 @@ def api_update_automation(filename: str):
         if not os.path.exists(fp):
             return jsonify({"error": "Automation niet gevonden"}), 404
 
-        automation = data.get("automation") or {}
+        automation = data["automation"] or {}
+        warnings: List[Dict[str, Any]] = []
 
-        # ✅ NIEUW: Validatie
+        # ✅ Validatie (blocking errors)
         validation_errors = validate_automation(automation)
         if validation_errors:
             return jsonify({
                 "error": "Validatie fouten gevonden:\n" + "\n".join(f"• {e}" for e in validation_errors)
             }), 400
 
-        warnings: List[Dict[str, Any]] = []
+        # ✅ Time warnings (niet blocking)
+        time_warns = get_time_warnings(automation)
+        for w in time_warns:
+            warnings.append({"warning": w, "severity": "info"})
 
-        # ✅ NIEUW: Entity dependency warnings
+        # ✅ Entity warnings (niet blocking)
         entity_warnings = validate_entities_exist(automation)
-        if entity_warnings:
-            warnings.extend([{"warning": w, "severity": "warning"} for w in entity_warnings])
+        for w in entity_warnings:
+            warnings.append({"warning": w, "severity": "warning"})
 
         loop_check = check_infinite_loop(automation)
         if loop_check:
             warnings.append(loop_check)
 
+        # Existing automations excluding current file
         existing: List[Dict[str, Any]] = []
         if os.path.exists(AUTOMATIONS_PATH):
             for fn in os.listdir(AUTOMATIONS_PATH):
@@ -1048,6 +1225,7 @@ def api_update_automation(filename: str):
 
         has_critical = any(w.get("severity") in ["error", "danger"] for w in warnings)
         confirmed = bool(data.get("confirmed", False))
+
         if has_critical and not confirmed:
             return jsonify({
                 "warnings": warnings,
@@ -1093,7 +1271,10 @@ def api_delete_automation(filename: str):
 # -----------------------------------------------------------------------------
 @app.route("/api/automations/search", methods=["POST"])
 def api_search_automations():
-    """Zoek automations met uitgebreide Nederlandse ondersteuning."""
+    """
+    Zoek automations met uitgebreide Nederlandse ondersteuning.
+    Body: {"query": "lamp avond"}
+    """
     try:
         data = request.json or {}
         query = (data.get("query", "") or "").strip()
@@ -1124,90 +1305,6 @@ def api_search_automations():
 
 
 # -----------------------------------------------------------------------------
-# FIX 6: Smart suggestions (AI-powered)
-# -----------------------------------------------------------------------------
-@app.route("/api/suggestions", methods=["POST"])
-def api_get_suggestions():
-    """AI-powered suggesties voor verbetering van automation."""
-    try:
-        data = request.json or {}
-        automation = data.get("automation") or {}
-
-        suggestions: List[Dict[str, Any]] = []
-        trigger = automation.get("trigger") or {}
-        action = automation.get("action") or {}
-
-        # Suggestie 1: Lamp aan maar niet uit
-        if action.get("type") == "turn_on" and trigger.get("type") in ["time", "sun"]:
-            entity = (action.get("value") or "")
-            if entity.startswith("light."):
-                suggestions.append({
-                    "icon": "💡",
-                    "title": "Vergeet je de lamp uit te zetten?",
-                    "description": f"Je zet '{entity}' aan, maar ik zie geen automation die hem weer uitzet. "
-                                   "Wil je ook een 'uit' automation maken?",
-                    "severity": "tip",
-                })
-
-        # Suggestie 2: Elke dag maar zou weekdays kunnen zijn
-        if trigger.get("type") == "time" and not trigger.get("days"):
-            time_val = trigger.get("value", "")
-            try:
-                hour = int(time_val.split(":")[0])
-                if 6 <= hour <= 9 or 22 <= hour <= 23:
-                    suggestions.append({
-                        "icon": "📅",
-                        "title": "Misschien alleen op doordeweekse dagen?",
-                        "description": f"Deze automation draait om {time_val} elke dag. "
-                                       "Wil je in het weekend misschien uitslapen of later naar bed?",
-                        "severity": "tip",
-                    })
-            except Exception:
-                pass
-
-        # Suggestie 3: Brightness te laag
-        if action.get("type") == "turn_on":
-            brightness = action.get("brightness")
-            try:
-                if brightness is not None and int(brightness) < 50:
-                    suggestions.append({
-                        "icon": "🔅",
-                        "title": "Lamp staat vrij donker",
-                        "description": f"De helderheid is {brightness}/255. Dat is best donker! "
-                                       "Is dat expres (bijv. nachtlampje)?",
-                        "severity": "info",
-                    })
-            except Exception:
-                pass
-
-        # Suggestie 4: Zonsondergang maar geen dagen filter
-        if trigger.get("type") == "sun" and trigger.get("sunEvent") == "sunset":
-            if not trigger.get("days"):
-                suggestions.append({
-                    "icon": "🌅",
-                    "title": "Elke dag zonsondergang",
-                    "description": "Deze automation gaat af bij elke zonsondergang. "
-                                   "Misschien wil je dit alleen in het weekend of juist doordeweeks?",
-                    "severity": "tip",
-                })
-
-        # Suggestie 5: Scene tip
-        if action.get("type") == "scene":
-            suggestions.append({
-                "icon": "✨",
-                "title": "Scene tip",
-                "description": "Je gebruikt een scene! Dat is slim. Tip: Maak scenes voor 'Ochtend', 'Avond', "
-                               "'Film kijken' etc. Dan kun je met 1 knop alles instellen.",
-                "severity": "tip",
-            })
-
-        return jsonify(suggestions)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# -----------------------------------------------------------------------------
 # Test endpoint (human steps + optional tech)
 # -----------------------------------------------------------------------------
 @app.route("/api/test", methods=["POST"])
@@ -1231,12 +1328,14 @@ def api_test_action():
 
         step("Test gestart: we doen alsof 'WANNEER' klopt en voeren alleen 'DAN' uit.", True)
 
+        # Turn on/off
         if atype in ("turn_on", "turn_off"):
             if not entity_id:
                 return jsonify({"error": "Geen keuze gemaakt bij DAN (kies eerst iets om aan/uit te zetten)."}), 400
 
             is_on = (atype == "turn_on")
 
+            # Light special
             if domain == "light":
                 svc_domain = "light"
                 svc_service = "turn_on" if is_on else "turn_off"
@@ -1256,55 +1355,82 @@ def api_test_action():
                     if data_payload:
                         payload["data"] = data_payload
 
-                step("We geven Home Assistant de opdracht om de lamp aan/uit te zetten.", True,
-                     {"call": f"{svc_domain}.{svc_service}", "payload": payload})
+                step(
+                    "We geven Home Assistant de opdracht om de lamp aan/uit te zetten.",
+                    True,
+                    {"call": f"{svc_domain}.{svc_service}", "payload": payload},
+                )
 
                 code, text = ha_call_service(svc_domain, svc_service, payload)
                 ok = (200 <= code < 300)
-                step("Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
-                     ok, {"http": code, "response": text})
+                step(
+                    "Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
+                    ok,
+                    {"http": code, "response": text},
+                )
                 return jsonify({"success": ok, "steps": steps})
 
+            # Generic on/off
             svc_domain = "homeassistant"
             svc_service = "turn_on" if is_on else "turn_off"
             payload = {"target": {"entity_id": entity_id}}
 
-            step("We geven Home Assistant de opdracht om iets aan/uit te zetten.", True,
-                 {"call": f"{svc_domain}.{svc_service}", "payload": payload})
+            step(
+                "We geven Home Assistant de opdracht om iets aan/uit te zetten.",
+                True,
+                {"call": f"{svc_domain}.{svc_service}", "payload": payload},
+            )
 
             code, text = ha_call_service(svc_domain, svc_service, payload)
             ok = (200 <= code < 300)
-            step("Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
-                 ok, {"http": code, "response": text})
+            step(
+                "Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
+                ok,
+                {"http": code, "response": text},
+            )
             return jsonify({"success": ok, "steps": steps})
 
+        # Notify
         if atype == "notify":
             msg = (action.get("value") or "").strip()
             if not msg:
                 return jsonify({"error": "Vul eerst een tekst in voor het berichtje."}), 400
 
             payload = {"data": {"title": "Automation Maker Test", "message": msg}}
-            step("We vragen Home Assistant om een berichtje te laten zien.", True,
-                 {"call": "persistent_notification.create", "payload": payload})
+            step(
+                "We vragen Home Assistant om een berichtje te laten zien.",
+                True,
+                {"call": "persistent_notification.create", "payload": payload},
+            )
 
             code, text = ha_call_service("persistent_notification", "create", payload)
             ok = (200 <= code < 300)
-            step("Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
-                 ok, {"http": code, "response": text})
+            step(
+                "Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
+                ok,
+                {"http": code, "response": text},
+            )
             return jsonify({"success": ok, "steps": steps})
 
+        # Scene
         if atype == "scene":
             if not entity_id:
                 return jsonify({"error": "Vul eerst een scene in."}), 400
 
             payload = {"target": {"entity_id": entity_id}}
-            step("We vragen Home Assistant om de sfeer/scene aan te zetten.", True,
-                 {"call": "scene.turn_on", "payload": payload})
+            step(
+                "We vragen Home Assistant om de sfeer/scene aan te zetten.",
+                True,
+                {"call": "scene.turn_on", "payload": payload},
+            )
 
             code, text = ha_call_service("scene", "turn_on", payload)
             ok = (200 <= code < 300)
-            step("Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
-                 ok, {"http": code, "response": text})
+            step(
+                "Home Assistant geeft antwoord: gelukt ✅" if ok else "Home Assistant geeft antwoord: mislukt ❌",
+                ok,
+                {"http": code, "response": text},
+            )
             return jsonify({"success": ok, "steps": steps})
 
         return jsonify({"error": "Actie type niet ondersteund in test"}), 400

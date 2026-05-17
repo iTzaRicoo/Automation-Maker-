@@ -5,7 +5,8 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
     bash \
-    curl
+    curl \
+    ffmpeg
 
 WORKDIR /app
 

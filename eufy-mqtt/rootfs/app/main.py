@@ -226,29 +226,25 @@ def on_message(ws, message):
 def on_open(ws):
     log("Connected to eufy-security-ws")
 
-    subscribe_messages = [
+    startup_messages = [
         {
-            "command": "subscribe",
-            "type": "event"
+            "messageId": "set_api_schema",
+            "command": "set_api_schema",
+            "schemaVersion": 21
         },
         {
-            "command": "subscribe",
-            "type": "device"
-        },
-        {
-            "command": "subscribe",
-            "type": "station"
+            "messageId": "start_listening",
+            "command": "start_listening"
         }
     ]
 
-    for msg in subscribe_messages:
+    for msg in startup_messages:
         try:
             ws.send(json.dumps(msg))
-
-            log("Sent subscribe:", msg)
+            log("Sent command:", msg)
 
         except Exception as e:
-            log("Subscribe error:", e)
+            log("Command error:", e)
 
 
 def on_error(ws, error):

@@ -38,6 +38,7 @@ if MQTT_USER:
     mqttc.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 
 log(f"Connecting to MQTT {MQTT_HOST}:{MQTT_PORT}")
+
 mqttc.connect(MQTT_HOST, MQTT_PORT, 60)
 mqttc.loop_start()
 
@@ -101,6 +102,7 @@ def pulse(topic):
 def publish_snapshot_from_url(image_url):
     try:
         log("Fetching snapshot:", image_url)
+
         r = requests.get(image_url, timeout=20)
 
         if r.status_code != 200:
@@ -108,7 +110,12 @@ def publish_snapshot_from_url(image_url):
             return
 
         SNAPSHOT_FILE.write_bytes(r.content)
-        mqttc.publish(f"{TOPIC_PREFIX}/snapshot", r.content)
+
+        mqttc.publish(
+            f"{TOPIC_PREFIX}/snapshot",
+            r.content
+        )
+
         log("Snapshot published:", SNAPSHOT_FILE)
 
     except Exception as e:
@@ -131,13 +138,16 @@ def find_snapshot_url(data):
 
     for key in candidates:
         value = data.get(key)
+
         if isinstance(value, str) and value.startswith("http"):
             return value
 
     payload = data.get("payload")
+
     if isinstance(payload, dict):
         for key in candidates:
             value = payload.get(key)
+
             if isinstance(value, str) and value.startswith("http"):
                 return value
 
@@ -147,9 +157,24 @@ def find_snapshot_url(data):
 def detect_event(data):
     text = json.dumps(data).lower()
 
-    is_motion = any(x in text for x in ["motion", "pir", "detected"])
-    is_ring = any(x in text for x in ["ring", "doorbell", "ding", "press"])
-    is_person = any(x in text for x in ["person", "human", "ai_person"])
+    is_motion = any(x in text for x in [
+        "motion",
+        "pir",
+        "detected"
+    ])
+
+    is_ring = any(x in text for x in [
+        "ring",
+        "doorbell",
+        "ding",
+        "press"
+    ])
+
+    is_person = any(x in text for x in [
+        "person",
+        "human",
+        "ai_person"
+    ])
 
     return is_motion, is_ring, is_person
 
@@ -159,34 +184,71 @@ def on_message(ws, message):
 
     try:
         data = json.loads(message)
+
     except Exception as e:
         log("JSON parse error:", e)
-        mqttc.publish(f"{TOPIC_PREFIX}/raw", str(message))
+
+        mqttc.publish(
+            f"{TOPIC_PREFIX}/raw",
+            str(message)
+        )
+
         return
 
-    mqttc.publish(f"{TOPIC_PREFIX}/raw", json.dumps(data))
+    mqttc.publish(
+        f"{TOPIC_PREFIX}/raw",
+        json.dumps(data)
+    )
 
     is_motion, is_ring, is_person = detect_event(data)
 
     if is_motion:
         log("Detected motion event")
+
         pulse(f"{TOPIC_PREFIX}/motion")
 
     if is_ring:
         log("Detected ring event")
+
         pulse(f"{TOPIC_PREFIX}/ring")
 
     if is_person:
         log("Detected person event")
+
         pulse(f"{TOPIC_PREFIX}/person")
 
     image_url = find_snapshot_url(data)
+
     if image_url:
         publish_snapshot_from_url(image_url)
 
 
 def on_open(ws):
     log("Connected to eufy-security-ws")
+
+    subscribe_messages = [
+        {
+            "command": "subscribe",
+            "type": "event"
+        },
+        {
+            "command": "subscribe",
+            "type": "device"
+        },
+        {
+            "command": "subscribe",
+            "type": "station"
+        }
+    ]
+
+    for msg in subscribe_messages:
+        try:
+            ws.send(json.dumps(msg))
+
+            log("Sent subscribe:", msg)
+
+        except Exception as e:
+            log("Subscribe error:", e)
 
 
 def on_error(ws, error):
@@ -220,6 +282,7 @@ def connect():
             log("WebSocket loop error:", e)
 
         log("Reconnect in 10 seconds")
+
         time.sleep(10)
 
 

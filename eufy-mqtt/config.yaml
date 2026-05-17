@@ -1,7 +1,7 @@
 name: "Eufy C30 MQTT Bridge"
-version: "0.1.10"
+version: "0.1.11"
 slug: "eufy_c30_mqtt"
-description: "Publish Eufy C30 doorbell events and snapshots from eufy-security-ws to MQTT/Home Assistant."
+description: "Publish Eufy C30 doorbell events, battery, and snapshots from eufy-security-ws to MQTT/Home Assistant."
 url: "https://github.com/YOUR_USERNAME/eufy-c30-mqtt-addon"
 arch:
   - amd64
@@ -25,6 +25,13 @@ options:
 
   eufy_host: ""
   eufy_port: 3000
+  device_serial: ""
+  station_serial: ""
+
+  rtsp_url: ""
+  snapshot_on_event: true
+  snapshot_interval_seconds: 0
+  livestream_warmup_seconds: 8
 
 schema:
   mqtt_host: str
@@ -35,3 +42,10 @@ schema:
 
   eufy_host: str
   eufy_port: int
+  device_serial: str
+  station_serial: str
+
+  rtsp_url: str
+  snapshot_on_event: bool
+  snapshot_interval_seconds: int
+  livestream_warmup_seconds: int

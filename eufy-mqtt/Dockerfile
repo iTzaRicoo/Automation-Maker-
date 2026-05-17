@@ -18,7 +18,6 @@ RUN pip3 install \
 
 COPY rootfs /
 
-RUN chmod +x /run.sh || true
-RUN chmod +x /app/run.sh || true
+RUN chmod a+x /etc/services.d/eufy-c30-mqtt/run
 
-CMD [ "/bin/bash", "/run.sh" ]
+CMD [ "/init" ]

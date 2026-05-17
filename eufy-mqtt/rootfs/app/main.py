@@ -1,5 +1,7 @@
 import base64
 import json
+import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +26,11 @@ EUFY_PORT = int(cfg.get("eufy_port", 3000))
 
 DEVICE_SERIAL = cfg.get("device_serial", "").strip()
 STATION_SERIAL = cfg.get("station_serial", "").strip()
+
+RTSP_URL = cfg.get("rtsp_url", "").strip()
+SNAPSHOT_ON_EVENT = bool(cfg.get("snapshot_on_event", True))
+SNAPSHOT_INTERVAL_SECONDS = int(cfg.get("snapshot_interval_seconds", 0))
+LIVESTREAM_WARMUP_SECONDS = int(cfg.get("livestream_warmup_seconds", 8))
 
 DISCOVERY_PREFIX = "homeassistant"
 
@@ -70,12 +77,14 @@ def publish_discovery():
         retain=True,
     )
 
-    for key, label, device_class in [
+    binary_sensors = [
         ("motion", "Motion", "motion"),
         ("person", "Person Detection", "motion"),
         ("ring", "Ring", None),
         ("connection_error", "Connection Error", "problem"),
-    ]:
+    ]
+
+    for key, label, device_class in binary_sensors:
         payload = {
             "name": f"Eufy C30 {label}",
             "state_topic": f"{TOPIC_PREFIX}/{key}",
@@ -94,15 +103,41 @@ def publish_discovery():
             retain=True,
         )
 
+    mqttc.publish(
+        f"{DISCOVERY_PREFIX}/sensor/eufy_c30_battery/config",
+        json.dumps({
+            "name": "Eufy C30 Battery",
+            "state_topic": f"{TOPIC_PREFIX}/battery",
+            "unique_id": "eufy_c30_battery",
+            "device_class": "battery",
+            "state_class": "measurement",
+            "unit_of_measurement": "%",
+            "device": device,
+        }),
+        retain=True,
+    )
 
-def mqtt_state(key, value):
-    mqttc.publish(f"{TOPIC_PREFIX}/{key}", value, retain=False)
+
+def mqtt_state(key, value, retain=False):
+    mqttc.publish(f"{TOPIC_PREFIX}/{key}", value, retain=retain)
 
 
 def pulse(key, seconds=2):
     mqtt_state(key, "ON")
     time.sleep(seconds)
     mqtt_state(key, "OFF")
+
+
+def publish_battery(value):
+    if value is None:
+        return
+
+    try:
+        battery = int(value)
+        mqtt_state("battery", str(battery), retain=True)
+        log("Battery published:", battery)
+    except Exception as e:
+        log("Battery parse error:", e)
 
 
 def publish_snapshot_bytes(image_bytes):
@@ -187,14 +222,6 @@ def extract_buffer_bytes(value):
 def handle_picture_value(picture):
     log("PICTURE RAW TYPE:", type(picture).__name__)
 
-    try:
-        preview = str(picture)
-        if len(preview) > 1000:
-            preview = preview[:1000] + "...[truncated]"
-        log("PICTURE RAW VALUE:", preview)
-    except Exception as e:
-        log("PICTURE RAW LOG ERROR:", e)
-
     if not picture:
         return
 
@@ -229,12 +256,9 @@ def handle_picture_value(picture):
         ]:
             value = picture.get(key)
 
-            if isinstance(value, str):
-                log(f"Picture field {key}:", value)
-
-                if value.startswith("http"):
-                    publish_snapshot_from_url(value)
-                    return
+            if isinstance(value, str) and value.startswith("http"):
+                publish_snapshot_from_url(value)
+                return
 
 
 def find_snapshot_in_object(obj):
@@ -311,6 +335,93 @@ def request_device_properties_metadata(serial):
     })
 
 
+def start_livestream():
+    if not DEVICE_SERIAL:
+        return
+
+    send_ws({
+        "messageId": f"start_livestream_{int(time.time() * 1000)}",
+        "command": "device.start_livestream",
+        "serialNumber": DEVICE_SERIAL,
+    })
+
+
+def stop_livestream():
+    if not DEVICE_SERIAL:
+        return
+
+    send_ws({
+        "messageId": f"stop_livestream_{int(time.time() * 1000)}",
+        "command": "device.stop_livestream",
+        "serialNumber": DEVICE_SERIAL,
+    })
+
+
+def ffmpeg_snapshot():
+    if not RTSP_URL:
+        log("No rtsp_url configured, cannot grab ffmpeg snapshot")
+        return
+
+    tmp_file = SNAPSHOT_DIR / "ffmpeg_latest.jpg"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-rtsp_transport", "tcp",
+        "-i", RTSP_URL,
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(tmp_file),
+    ]
+
+    try:
+        log("Starting livestream for snapshot")
+        start_livestream()
+
+        time.sleep(LIVESTREAM_WARMUP_SECONDS)
+
+        log("Running ffmpeg snapshot")
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            log("ffmpeg snapshot failed:", result.stderr.decode(errors="ignore")[-1500:])
+            return
+
+        if tmp_file.exists():
+            publish_snapshot_bytes(tmp_file.read_bytes())
+            log("ffmpeg snapshot published")
+
+    except Exception as e:
+        log("ffmpeg snapshot error:", e)
+
+    finally:
+        stop_livestream()
+
+
+def trigger_snapshot(reason):
+    if not SNAPSHOT_ON_EVENT:
+        return
+
+    log("Triggering snapshot because:", reason)
+    threading.Thread(target=ffmpeg_snapshot, daemon=True).start()
+
+
+def periodic_snapshot_loop():
+    if SNAPSHOT_INTERVAL_SECONDS <= 0:
+        return
+
+    log("Periodic snapshots enabled:", SNAPSHOT_INTERVAL_SECONDS, "seconds")
+
+    while True:
+        time.sleep(SNAPSHOT_INTERVAL_SECONDS)
+        trigger_snapshot("periodic")
+
+
 def update_serials_from_state(result):
     global DEVICE_SERIAL, STATION_SERIAL
 
@@ -356,6 +467,9 @@ def detect_event(data):
         if prop_name == "persondetected" and value is True:
             is_person = True
 
+        if prop_name == "battery":
+            publish_battery(value)
+
         if prop_name == "picture":
             handle_picture_value(value)
 
@@ -383,17 +497,22 @@ def handle_result(data):
     if isinstance(result, dict) and "properties" in result:
         props = result["properties"]
 
+        publish_battery(props.get("battery"))
+
         if props.get("motionDetected") is True:
             log("PROPERTY motionDetected TRUE")
             pulse("motion", 2)
+            trigger_snapshot("motion property")
 
         if props.get("personDetected") is True:
             log("PROPERTY personDetected TRUE")
             pulse("person", 2)
+            trigger_snapshot("person property")
 
         if props.get("ringing") is True:
             log("PROPERTY ringing TRUE")
             pulse("ring", 2)
+            trigger_snapshot("ringing property")
 
         if "picture" in props:
             handle_picture_value(props.get("picture"))
@@ -439,16 +558,19 @@ def on_message(ws, message):
     if is_ring:
         log("Detected ring event")
         pulse("ring", 2)
+        trigger_snapshot("ring")
         poll_after_event("ring")
 
     if is_motion:
         log("Detected motion event")
         pulse("motion", 2)
+        trigger_snapshot("motion")
         poll_after_event("motion")
 
     if is_person:
         log("Detected person event")
         pulse("person", 2)
+        trigger_snapshot("person")
         poll_after_event("person")
 
 
@@ -508,4 +630,5 @@ def connect():
 
 
 if __name__ == "__main__":
+    threading.Thread(target=periodic_snapshot_loop, daemon=True).start()
     connect()

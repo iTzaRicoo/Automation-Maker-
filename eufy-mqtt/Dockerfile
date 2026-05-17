@@ -16,8 +16,6 @@ RUN pip3 install \
     --no-cache-dir \
     -r requirements.txt
 
-COPY rootfs /
+COPY rootfs/app/main.py /app/main.py
 
-RUN chmod a+x /etc/services.d/eufy-c30-mqtt/run
-
-CMD [ "/init" ]
+CMD [ "python3", "/app/main.py" ]

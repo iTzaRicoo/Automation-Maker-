@@ -18,6 +18,7 @@ RUN pip3 install \
 
 COPY rootfs /
 
-RUN chmod a+x /run.sh
+RUN chmod +x /run.sh || true
+RUN chmod +x /app/run.sh || true
 
-CMD [ "/run.sh" ]
+CMD [ "/bin/bash", "/run.sh" ]

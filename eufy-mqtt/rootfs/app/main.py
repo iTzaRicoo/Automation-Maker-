@@ -1,7 +1,6 @@
 import base64
 import json
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
@@ -23,10 +22,10 @@ TOPIC_PREFIX = cfg.get("mqtt_topic_prefix", "eufy/c30").rstrip("/")
 EUFY_HOST = cfg.get("eufy_host", "")
 EUFY_PORT = int(cfg.get("eufy_port", 3000))
 
-DISCOVERY_PREFIX = "homeassistant"
-
 DEVICE_SERIAL = cfg.get("device_serial", "").strip()
 STATION_SERIAL = cfg.get("station_serial", "").strip()
+
+DISCOVERY_PREFIX = "homeassistant"
 
 SNAPSHOT_DIR = Path("/share/eufy_c30_mqtt")
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -59,24 +58,22 @@ def publish_discovery():
         "model": "C30",
     }
 
-    camera_payload = {
-        "name": "Eufy C30 Snapshot",
-        "unique_id": "eufy_c30_snapshot",
-        "topic": f"{TOPIC_PREFIX}/snapshot",
-        "image_encoding": "b64",
-        "device": device,
-    }
-
     mqttc.publish(
         f"{DISCOVERY_PREFIX}/camera/eufy_c30_snapshot/config",
-        json.dumps(camera_payload),
+        json.dumps({
+            "name": "Eufy C30 Snapshot",
+            "unique_id": "eufy_c30_snapshot",
+            "topic": f"{TOPIC_PREFIX}/snapshot",
+            "image_encoding": "b64",
+            "device": device,
+        }),
         retain=True,
     )
 
     sensors = [
         ("motion", "Motion", "motion"),
-        ("ring", "Ring", None),
         ("person", "Person Detection", "motion"),
+        ("ring", "Ring", None),
         ("connection_error", "Connection Error", "problem"),
     ]
 
@@ -111,12 +108,8 @@ def pulse(key, seconds=2):
 
 
 def publish_snapshot_bytes(image_bytes):
-    if not image_bytes:
-        log("Snapshot empty")
-        return
-
-    if len(image_bytes) < 10:
-        log("Snapshot too small:", len(image_bytes))
+    if not image_bytes or len(image_bytes) < 10:
+        log("Snapshot invalid or empty")
         return
 
     SNAPSHOT_FILE.write_bytes(image_bytes)
@@ -130,7 +123,6 @@ def publish_snapshot_bytes(image_bytes):
 def publish_snapshot_from_url(image_url):
     try:
         log("Fetching snapshot URL:", image_url)
-
         r = requests.get(image_url, timeout=20)
 
         if r.status_code != 200:
@@ -148,11 +140,11 @@ def extract_buffer_bytes(value):
         if value.get("type") == "Buffer" and isinstance(value.get("data"), list):
             return bytes(value["data"])
 
-        if isinstance(value.get("data"), dict):
-            return extract_buffer_bytes(value["data"])
-
         if isinstance(value.get("data"), list):
             return bytes(value["data"])
+
+        if isinstance(value.get("data"), dict):
+            return extract_buffer_bytes(value["data"])
 
     if isinstance(value, list):
         return bytes(value)
@@ -179,46 +171,16 @@ def find_snapshot_in_object(obj):
 
                 if isinstance(value, str) and value.startswith("http"):
                     publish_snapshot_from_url(value)
-                    return None
 
             result = find_snapshot_in_object(value)
             if result:
                 return result
 
-    elif isinstance(obj, list):
+    if isinstance(obj, list):
         for item in obj:
             result = find_snapshot_in_object(item)
             if result:
                 return result
-
-    return None
-
-
-def find_snapshot_url(data):
-    candidates = [
-        "snapshot",
-        "snapshotUrl",
-        "image",
-        "imageUrl",
-        "picture",
-        "pictureUrl",
-        "thumbnail",
-        "thumbnailUrl",
-        "eventImage",
-        "eventImageUrl",
-    ]
-
-    for key in candidates:
-        value = data.get(key)
-        if isinstance(value, str) and value.startswith("http"):
-            return value
-
-    payload = data.get("payload")
-    if isinstance(payload, dict):
-        for key in candidates:
-            value = payload.get(key)
-            if isinstance(value, str) and value.startswith("http"):
-                return value
 
     return None
 
@@ -243,7 +205,7 @@ def request_device_properties(serial):
         return
 
     send_ws({
-        "messageId": f"device_properties_{int(time.time())}",
+        "messageId": f"device_properties_{int(time.time() * 1000)}",
         "command": "device.get_properties",
         "serialNumber": serial,
     })
@@ -254,42 +216,9 @@ def request_device_properties_metadata(serial):
         return
 
     send_ws({
-        "messageId": f"device_properties_metadata_{int(time.time())}",
+        "messageId": f"device_properties_metadata_{int(time.time() * 1000)}",
         "command": "device.get_properties_metadata",
         "serialNumber": serial,
-    })
-
-
-def request_recent_events(station_serial, device_serial=None):
-    if not station_serial:
-        return
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(minutes=10)
-
-    cmd = {
-        "messageId": f"database_query_{int(time.time())}",
-        "command": "station.database_query_by_date",
-        "serialNumber": station_serial,
-        "startDate": start.isoformat(),
-        "endDate": end.isoformat(),
-    }
-
-    if device_serial:
-        cmd["serialNumbers"] = [device_serial]
-
-    send_ws(cmd)
-
-
-def download_station_image(station_serial, file_name):
-    if not station_serial or not file_name:
-        return
-
-    send_ws({
-        "messageId": f"download_image_{int(time.time())}",
-        "command": "station.download_image",
-        "serialNumber": station_serial,
-        "file": file_name,
     })
 
 
@@ -321,8 +250,8 @@ def detect_event(data):
     state = event.get("state")
 
     is_motion = False
-    is_ring = False
     is_person = False
+    is_ring = False
     is_connection_error = False
 
     if event_name == "connection error":
@@ -332,44 +261,23 @@ def detect_event(data):
         if prop_name == "ringing" and value is True:
             is_ring = True
 
-        if prop_name in [
-            "motiondetected",
-            "motion_detected",
-            "motion",
-            "motionsensorpir",
-        ] and value is True:
+        if prop_name == "motiondetected" and value is True:
             is_motion = True
 
-        if prop_name in [
-            "persondetected",
-            "person_detected",
-            "person",
-            "human",
-            "human_detected",
-            "humandetected",
-        ] and value is True:
+        if prop_name == "persondetected" and value is True:
             is_person = True
 
-        if prop_name in [
-            "picture",
-            "snapshot",
-            "thumbnail",
-            "image",
-        ]:
+        if prop_name == "picture" and value:
             img = extract_buffer_bytes(value)
             if img:
                 publish_snapshot_bytes(img)
+            elif isinstance(value, str) and value.startswith("http"):
+                publish_snapshot_from_url(value)
 
     if event_name == "rings" and state is True:
         is_ring = True
 
-    if event_name in ["motion detected", "motion", "motion detected event"] and state is True:
-        is_motion = True
-
-    if event_name in ["person detected", "person", "human detected"] and state is True:
-        is_person = True
-
-    return is_motion, is_ring, is_person, is_connection_error
+    return is_motion, is_person, is_ring, is_connection_error
 
 
 def handle_result(data):
@@ -383,18 +291,52 @@ def handle_result(data):
             request_device_properties_metadata(DEVICE_SERIAL)
             request_device_properties(DEVICE_SERIAL)
 
-        if STATION_SERIAL:
-            request_recent_events(STATION_SERIAL, DEVICE_SERIAL)
-
     img = find_snapshot_in_object(result)
     if img:
         publish_snapshot_bytes(img)
 
-    if isinstance(result, dict):
-        for key in ["file", "filename", "path", "name"]:
-            value = result.get(key)
-            if isinstance(value, str) and STATION_SERIAL:
-                download_station_image(STATION_SERIAL, value)
+    if isinstance(result, dict) and "properties" in result:
+        props = result["properties"]
+
+        motion = props.get("motionDetected")
+        person = props.get("personDetected")
+        ringing = props.get("ringing")
+        picture = props.get("picture")
+
+        if motion is True:
+            log("PROPERTY motionDetected TRUE")
+            pulse("motion", 2)
+
+        if person is True:
+            log("PROPERTY personDetected TRUE")
+            pulse("person", 2)
+
+        if ringing is True:
+            log("PROPERTY ringing TRUE")
+            pulse("ring", 2)
+
+        if picture:
+            log("PROPERTY picture found")
+
+            img = extract_buffer_bytes(picture)
+
+            if img:
+                publish_snapshot_bytes(img)
+
+            elif isinstance(picture, str) and picture.startswith("http"):
+                publish_snapshot_from_url(picture)
+
+
+def poll_after_event(reason):
+    if not DEVICE_SERIAL:
+        return
+
+    log(f"Polling after {reason}")
+
+    for i in range(10):
+        time.sleep(2)
+        log(f"Polling properties attempt {i + 1}/10")
+        request_device_properties(DEVICE_SERIAL)
 
 
 def on_message(ws, message):
@@ -409,20 +351,14 @@ def on_message(ws, message):
 
     mqttc.publish(f"{TOPIC_PREFIX}/raw", json.dumps(data))
 
-    msg_type = data.get("type")
-
-    if msg_type == "result":
+    if data.get("type") == "result":
         handle_result(data)
-
-    image_url = find_snapshot_url(data)
-    if image_url:
-        publish_snapshot_from_url(image_url)
 
     img = find_snapshot_in_object(data)
     if img:
         publish_snapshot_bytes(img)
 
-    is_motion, is_ring, is_person, is_connection_error = detect_event(data)
+    is_motion, is_person, is_ring, is_connection_error = detect_event(data)
 
     if is_connection_error:
         log("Detected station connection error")
@@ -431,27 +367,17 @@ def on_message(ws, message):
     if is_ring:
         log("Detected ring event")
         pulse("ring", 2)
-
-        if DEVICE_SERIAL:
-            time.sleep(1)
-            request_device_properties(DEVICE_SERIAL)
-
-        if STATION_SERIAL:
-            request_recent_events(STATION_SERIAL, DEVICE_SERIAL)
+        poll_after_event("ring")
 
     if is_motion:
         log("Detected motion event")
         pulse("motion", 2)
-
-        if DEVICE_SERIAL:
-            request_device_properties(DEVICE_SERIAL)
+        poll_after_event("motion")
 
     if is_person:
         log("Detected person event")
         pulse("person", 2)
-
-        if DEVICE_SERIAL:
-            request_device_properties(DEVICE_SERIAL)
+        poll_after_event("person")
 
 
 def on_open(ws):

@@ -70,14 +70,12 @@ def publish_discovery():
         retain=True,
     )
 
-    sensors = [
+    for key, label, device_class in [
         ("motion", "Motion", "motion"),
         ("person", "Person Detection", "motion"),
         ("ring", "Ring", None),
         ("connection_error", "Connection Error", "problem"),
-    ]
-
-    for key, label, device_class in sensors:
+    ]:
         payload = {
             "name": f"Eufy C30 {label}",
             "state_topic": f"{TOPIC_PREFIX}/{key}",
@@ -135,6 +133,31 @@ def publish_snapshot_from_url(image_url):
         log("Snapshot URL error:", e)
 
 
+def looks_like_base64_image(value):
+    if not isinstance(value, str):
+        return False
+
+    if value.startswith("data:image"):
+        return True
+
+    if len(value) < 100:
+        return False
+
+    return value.startswith("/9j/") or value.startswith("iVBOR")
+
+
+def decode_base64_image(value):
+    try:
+        if value.startswith("data:image"):
+            value = value.split(",", 1)[1]
+
+        return base64.b64decode(value)
+
+    except Exception as e:
+        log("Base64 image decode error:", e)
+        return None
+
+
 def extract_buffer_bytes(value):
     if isinstance(value, dict):
         if value.get("type") == "Buffer" and isinstance(value.get("data"), list):
@@ -146,10 +169,72 @@ def extract_buffer_bytes(value):
         if isinstance(value.get("data"), dict):
             return extract_buffer_bytes(value["data"])
 
+        if isinstance(value.get("buffer"), list):
+            return bytes(value["buffer"])
+
+        if isinstance(value.get("bytes"), list):
+            return bytes(value["bytes"])
+
     if isinstance(value, list):
         return bytes(value)
 
+    if looks_like_base64_image(value):
+        return decode_base64_image(value)
+
     return None
+
+
+def handle_picture_value(picture):
+    log("PICTURE RAW TYPE:", type(picture).__name__)
+
+    try:
+        preview = str(picture)
+        if len(preview) > 1000:
+            preview = preview[:1000] + "...[truncated]"
+        log("PICTURE RAW VALUE:", preview)
+    except Exception as e:
+        log("PICTURE RAW LOG ERROR:", e)
+
+    if not picture:
+        return
+
+    img = extract_buffer_bytes(picture)
+
+    if img:
+        log("Picture buffer/base64 extracted")
+        publish_snapshot_bytes(img)
+        return
+
+    if isinstance(picture, str):
+        log("Picture string value:", picture[:300])
+
+        if picture.startswith("http"):
+            publish_snapshot_from_url(picture)
+            return
+
+    if isinstance(picture, dict):
+        log("Picture dict keys:", list(picture.keys()))
+
+        for key in [
+            "url",
+            "imageUrl",
+            "snapshotUrl",
+            "pictureUrl",
+            "thumbnailUrl",
+            "eventImageUrl",
+            "path",
+            "file",
+            "filename",
+            "name",
+        ]:
+            value = picture.get(key)
+
+            if isinstance(value, str):
+                log(f"Picture field {key}:", value)
+
+                if value.startswith("http"):
+                    publish_snapshot_from_url(value)
+                    return
 
 
 def find_snapshot_in_object(obj):
@@ -164,6 +249,10 @@ def find_snapshot_in_object(obj):
                 "image",
                 "eventimage",
                 "event_image",
+                "pictureurl",
+                "snapshoturl",
+                "thumbnailurl",
+                "imageurl",
             ]:
                 img = extract_buffer_bytes(value)
                 if img:
@@ -267,12 +356,8 @@ def detect_event(data):
         if prop_name == "persondetected" and value is True:
             is_person = True
 
-        if prop_name == "picture" and value:
-            img = extract_buffer_bytes(value)
-            if img:
-                publish_snapshot_bytes(img)
-            elif isinstance(value, str) and value.startswith("http"):
-                publish_snapshot_from_url(value)
+        if prop_name == "picture":
+            handle_picture_value(value)
 
     if event_name == "rings" and state is True:
         is_ring = True
@@ -298,33 +383,20 @@ def handle_result(data):
     if isinstance(result, dict) and "properties" in result:
         props = result["properties"]
 
-        motion = props.get("motionDetected")
-        person = props.get("personDetected")
-        ringing = props.get("ringing")
-        picture = props.get("picture")
-
-        if motion is True:
+        if props.get("motionDetected") is True:
             log("PROPERTY motionDetected TRUE")
             pulse("motion", 2)
 
-        if person is True:
+        if props.get("personDetected") is True:
             log("PROPERTY personDetected TRUE")
             pulse("person", 2)
 
-        if ringing is True:
+        if props.get("ringing") is True:
             log("PROPERTY ringing TRUE")
             pulse("ring", 2)
 
-        if picture:
-            log("PROPERTY picture found")
-
-            img = extract_buffer_bytes(picture)
-
-            if img:
-                publish_snapshot_bytes(img)
-
-            elif isinstance(picture, str) and picture.startswith("http"):
-                publish_snapshot_from_url(picture)
+        if "picture" in props:
+            handle_picture_value(props.get("picture"))
 
 
 def poll_after_event(reason):

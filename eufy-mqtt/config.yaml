@@ -1,5 +1,5 @@
 name: "Eufy C30 MQTT Bridge"
-version: "0.1.5"
+version: "0.1.6"
 slug: "eufy_c30_mqtt"
 description: "Publish Eufy C30 doorbell events and snapshots from eufy-security-ws to MQTT/Home Assistant."
 url: "https://github.com/YOUR_USERNAME/eufy-c30-mqtt-addon"
